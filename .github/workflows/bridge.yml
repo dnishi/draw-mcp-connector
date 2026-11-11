@@ -82,19 +82,24 @@ jobs:
           # Ad-hoc signature without a certificate. Seals the whole .app, including Info.plist
           codesign --force --sign - "$app"
           codesign --verify --strict --verbose=2 "$app"
-          # upload-artifact's zip drops the executable bit, so zip with ditto and upload it as is
-          ditto -c -k --keepParent "$app" target/draw-mcp-connector-macos.zip
+          # upload-artifact's zip drops the executable bit, so zip with ditto and upload it as is.
+          # The file name becomes the name attached to the Release. The build is for Apple Silicon only, so the name says so.
+          # No version in the name (the canvas page's releases/latest/download/<name> link would change with every version)
+          ditto -c -k --keepParent "$app" target/Draw-MCP-Connector-macOS-AppleSilicon.zip
       - if: runner.os == 'macOS'
         uses: actions/upload-artifact@v7
         with:
-          path: src/bridge/target/draw-mcp-connector-macos.zip
+          path: src/bridge/target/Draw-MCP-Connector-macOS-AppleSilicon.zip
           archive: false
           if-no-files-found: error
 
+      # Rename to the name attached to the Release (no version in it, for the same reason as macOS)
+      - if: runner.os == 'Windows'
+        run: cp target/${{ matrix.target }}/release/draw-mcp-connector.exe target/Draw-MCP-Connector-Windows-x64.exe
       - if: runner.os == 'Windows'
         uses: actions/upload-artifact@v7
         with:
-          path: src/bridge/target/${{ matrix.target }}/release/draw-mcp-connector.exe
+          path: src/bridge/target/Draw-MCP-Connector-Windows-x64.exe
           archive: false
           if-no-files-found: error
 
