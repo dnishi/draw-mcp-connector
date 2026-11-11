@@ -50,6 +50,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - run: rustup target add ${{ matrix.target }}
+      # Cache the build of the dependency crates (~/.cargo and target) to speed up builds from the second run.
+      # The cache key includes the OS, job, Cargo.lock and rustc version, so it is rebuilt when any of them changes
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src/bridge
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --target ${{ matrix.target }} -- -D warnings
       - run: cargo test --target ${{ matrix.target }}
@@ -109,11 +114,14 @@ jobs:
             echo "::error::Tag $GITHUB_REF_NAME does not match the version $version in Cargo.toml"
             exit 1
           fi
-      # The artifacts are uploaded unzipped (archive: false), so download them with v8, which does not try to unzip them
+      # The artifacts are uploaded unzipped (archive: false), so download them with v8.
+      # The macOS artifact is the zip made by ditto itself, and v8 unzips zips by default (giving an .app folder
+      # and dropping the executable bit). skip-decompress downloads the files exactly as uploaded
       - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
+          skip-decompress: true
       - run: gh release create "$GITHUB_REF_NAME" ../../dist/* --title "$GITHUB_REF_NAME" --generate-notes
         env:
           GH_TOKEN: ${{ github.token }}
