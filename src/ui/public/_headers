@@ -1,0 +1,13 @@
+# Headers for the canvas page. Read by Cloudflare Workers static assets (this file itself is not served)
+# https://developers.cloudflare.com/workers/static-assets/headers/
+#
+# Content-Security-Policy: even if an unexpected script gets into the page, do not run it (protects the token in the URL and the resume key)
+# - script-src / style-src / img-src / font-src: only files from this site. No inline scripts or style elements are used
+#   (React's style attribute is written through the CSSOM, so it is not subject to style-src)
+# - connect-src: allow WebTransport to the PC (bridge). The target is a LAN IP that differs per user, so it cannot be narrowed
+#   - 'unsafe-webtransport-hashes': WebTransport with serverCertificateHashes is blocked without this (CSP Level 3 connect-src pre-request check)
+#   - https:: browsers that do not know 'unsafe-webtransport-hashes' decide by URL
+# - object-src / base-uri / form-action: not used, so forbidden
+# - frame-ancestors: do not let other sites embed the page
+/*
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'self' https: 'unsafe-webtransport-hashes'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'

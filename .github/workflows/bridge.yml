@@ -1,0 +1,89 @@
+# Build of the bridge (the resident PC app). The app is built only by this workflow
+name: bridge
+
+on:
+  push:
+    paths: ['src/bridge/**', 'src/ui/src/features/sync/protocol.ts', '.github/workflows/bridge.yml']
+  pull_request:
+    paths: ['src/bridge/**', 'src/ui/src/features/sync/protocol.ts', '.github/workflows/bridge.yml']
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: src/bridge
+
+env:
+  # Canvas page (HTTPS), set by the repository variable BRIDGE_CANVAS_URL.
+  # If unset, the app opens the Vite dev server on the same PC (http://127.0.0.1:5173/)
+  BRIDGE_CANVAS_URL: ${{ vars.BRIDGE_CANVAS_URL }}
+
+jobs:
+  # Checks dependency crates (advisories such as vulnerabilities, licenses, unused crates, sources). Config: src/bridge/deny.toml.
+  # Reads Cargo.lock only and does not build the app. The official Action runs in Docker, so it runs on a Linux runner
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: src/bridge/Cargo.toml
+          # Add --locked (do not let it rewrite Cargo.lock) to the Action's default (--all-features)
+          arguments: --all-features --locked
+          # Use stable, the same as the build job, instead of the Rust in the Action's image (1.85)
+          rust-version: stable
+
+  build:
+    # Do not build the app unless the checks pass
+    needs: deny
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup target add ${{ matrix.target }}
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --target ${{ matrix.target }} -- -D warnings
+      - run: cargo test --target ${{ matrix.target }}
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+
+      # macOS: package as an .app that stays in the menu bar
+      - name: Package macOS app
+        if: runner.os == 'macOS'
+        run: |
+          app="target/Draw MCP Connector.app"
+          # version from Cargo.toml (after the trailing # or @ of cargo pkgid)
+          version=$(cargo pkgid | sed 's/.*[#@]//')
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          # App icon: src/app_icon.rs writes PNGs and iconutil combines them into .icns
+          cargo test --target ${{ matrix.target }} app_icon::tests::write_iconset -- --ignored
+          iconutil -c icns target/AppIcon.iconset -o "$app/Contents/Resources/AppIcon.icns"
+          cp "target/${{ matrix.target }}/release/draw-mcp-connector" "$app/Contents/MacOS/draw-mcp-connector"
+          # License of the app (MIT) and the source and license of the bundled glyph data (KanjiVG, CC BY-SA 3.0)
+          cp ../../LICENSE "$app/Contents/Resources/LICENSE"
+          cp assets/kanjivg/README.md "$app/Contents/Resources/KanjiVG-LICENSE.md"
+          # Licenses of the bundled crates (copyright and permission notices required by MIT, etc.)
+          python3 -I tools/third_party_licenses.py ${{ matrix.target }} "$app/Contents/Resources/THIRD-PARTY-LICENSES.txt"
+          sed "s/__VERSION__/$version/g" macos/Info.plist > "$app/Contents/Info.plist"
+          plutil -lint "$app/Contents/Info.plist"
+          # Ad-hoc signature without a certificate. Seals the whole .app, including Info.plist
+          codesign --force --sign - "$app"
+          codesign --verify --strict --verbose=2 "$app"
+          # upload-artifact's zip drops the executable bit, so zip with ditto and upload it as is
+          ditto -c -k --keepParent "$app" target/draw-mcp-connector-macos.zip
+      - if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v7
+        with:
+          path: src/bridge/target/draw-mcp-connector-macos.zip
+          archive: false
+          if-no-files-found: error
+
+      - if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v7
+        with:
+          path: src/bridge/target/${{ matrix.target }}/release/draw-mcp-connector.exe
+          archive: false
+          if-no-files-found: error

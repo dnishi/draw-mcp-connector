@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Information for the macOS .app. Used by GitHub Actions (.github/workflows/bridge.yml) when assembling the .app.
+  __VERSION__ is replaced with the version in Cargo.toml
+-->
+<plist version="1.0">
+<dict>
+  <!-- App icon (Contents/Resources/AppIcon.icns, created in bridge.yml) -->
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
+  <key>CFBundleExecutable</key>
+  <string>draw-mcp-connector</string>
+  <key>CFBundleIdentifier</key>
+  <string>io.github.dnishi.draw-mcp.connector</string>
+  <key>CFBundleName</key>
+  <string>Draw MCP Connector</string>
+  <key>CFBundleDisplayName</key>
+  <string>Draw MCP Connector</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>__VERSION__</string>
+  <key>CFBundleVersion</key>
+  <string>__VERSION__</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <!-- Match the default deployment target of Rust's aarch64-apple-darwin (macOS 11) -->
+  <key>LSMinimumSystemVersion</key>
+  <string>11.0</string>
+  <!-- Stay only in the menu bar; do not appear in the Dock or the app switcher -->
+  <key>LSUIElement</key>
+  <true/>
+  <!-- Explanation for the local network permission when replying to the canvas page (sending UDP within the LAN) (Apple TN3179) -->
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>iPad のキャンバスと同期するために、ローカルネットワークを使います。</string>
+</dict>
+</plist>

@@ -1,0 +1,7 @@
+# Check out with LF line endings on every OS.
+# Git on Windows may convert to CRLF on checkout, which breaks the comparison between the generated file
+# (src/ui/src/features/sync/protocol.ts) and freshly generated output, as well as the Prettier check
+* text=auto eol=lf
+
+# Do not convert line endings in binaries such as the glyph data (src/bridge/assets/kanjivg/glyphs.bin)
+*.bin binary

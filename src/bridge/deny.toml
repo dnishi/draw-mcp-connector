@@ -1,0 +1,30 @@
+# cargo-deny configuration. CI runs `cargo deny check` (deny job in .github/workflows/bridge.yml)
+# Format: https://embarkstudios.github.io/cargo-deny/checks/cfg.html
+
+[graph]
+# Check only the dependencies of the distributed targets (dependencies used only on Linux are excluded)
+targets = ["aarch64-apple-darwin", "x86_64-pc-windows-msvc"]
+
+[advisories]
+# RustSec advisories. Defaults: vulnerabilities and notices are errors, unmaintained crates are errors,
+# unsound is an error only for crates this crate uses directly, yanked versions are warnings
+
+[licenses]
+# The app is distributed under MIT. Only the licenses required by the current dependencies (Cargo.lock) are allowed.
+# Crates under "A OR B" let us choose MIT or Apache-2.0, so alternatives not listed here (BSL-1.0, 0BSD, Unlicense) are not added.
+# Before allowing another license, check MIT distribution and how it appears in THIRD-PARTY-LICENSES.txt (tools/third_party_licenses.py)
+allow = [
+    "MIT",
+    "Apache-2.0",   # rmcp, tao, ring, etc.
+    "ISC",          # ring, rustls-webpki, untrusted
+    "BSD-2-Clause", # octets
+    "BSD-3-Clause", # subtle, matchit
+    "Unicode-3.0",  # icu_*, zerovec, etc. (also unicode-ident)
+    "Zlib",         # zlib-rs
+]
+
+# This app itself (license = "MIT AND CC-BY-SA-3.0" in Cargo.toml).
+# CC BY-SA 3.0 is the license of the bundled glyph data (assets/kanjivg/) and is not allowed for dependencies
+[[licenses.exceptions]]
+name = "bridge"
+allow = ["CC-BY-SA-3.0"]

@@ -1,0 +1,7 @@
+# Files created by the macOS Finder
+.DS_Store
+
+# Build output of the bridge (Rust)
+/src/bridge/target/
+
+# Build output and dependencies of src/ui are excluded by src/ui/.gitignore
