@@ -1,4 +1,5 @@
 import {
+  Camera,
   Eraser,
   ImagePlus,
   Move,
@@ -36,10 +37,17 @@ interface Choice<T extends string> {
   /** Button name (used by screen readers) */
   label: string;
   content: ReactNode;
+  disabled?: boolean;
+  /** The button's ref (used as a popover anchor) */
+  ref?: Ref<HTMLButtonElement>;
 }
 
 /** Tool choices. The pen icon is drawn in the selected color */
-function toolChoices(penColor: string): Choice<Tool>[] {
+function toolChoices(
+  penColor: string,
+  canMoveImage: boolean,
+  moveImageButtonRef: Ref<HTMLButtonElement> | undefined,
+): Choice<Tool>[] {
   return [
     {
       value: 'pen',
@@ -48,6 +56,15 @@ function toolChoices(penColor: string): Choice<Tool>[] {
       content: <Pen style={{ color: penColor }} />,
     },
     { value: 'eraser', label: 'Eraser', content: <Eraser /> },
+    // While selected, a swipe moves the image and a two-finger pinch resizes the image (not the canvas).
+    // Selecting it or clicking the image shows the size and delete popover (ImageSettingsPopover)
+    {
+      value: 'move',
+      label: 'Move Image',
+      content: <Move />,
+      disabled: !canMoveImage,
+      ref: moveImageButtonRef,
+    },
   ];
 }
 
@@ -100,6 +117,8 @@ function ChoiceGroup<T extends string>({
           // Marker used to find the button the popover is anchored to
           data-value={choice.value}
           aria-label={choice.label}
+          disabled={choice.disabled}
+          ref={choice.ref}
           onClick={() => onPress?.(choice.value)}
         >
           {choice.content}
@@ -309,12 +328,13 @@ type ToolbarProps = EraserSettingsProps &
     onClear: () => void;
     /** Imports an image (opens the file picker) */
     onImport: () => void;
-    /** Whether the image is in move mode. When ON, swipe moves it and pinch zooms it */
-    imageMove: boolean;
-    onImageMoveChange: (enabled: boolean) => void;
-    /** The "Move Image" button (anchor for showing the image size and delete popover next to this button) */
+    /** Opens the camera to take a photo. null when there is no camera, which hides the button */
+    onTakePhoto: (() => void) | null;
+    /** When Move Image is pressed, whether or not it's already selected. Used to open and close the image size and delete popover */
+    onMoveImagePress: () => void;
+    /** The Move Image button (the anchor for showing the image size and delete popover beside it) */
     moveImageButtonRef?: Ref<HTMLButtonElement>;
-    /** Whether an image is placed (move mode is unavailable without one) */
+    /** Whether an image is placed (the move tool can't be used without one) */
     canMoveImage: boolean;
   };
 
@@ -342,8 +362,8 @@ export function Toolbar({
   customColor,
   onCustomColorChange,
   onImport,
-  imageMove,
-  onImageMoveChange,
+  onTakePhoto,
+  onMoveImagePress,
   moveImageButtonRef,
   canMoveImage,
   ...eraserSettings
@@ -362,6 +382,13 @@ export function Toolbar({
 
   // Pressing a tool opens its settings popover. Pressing the selected tool toggles it
   const onToolPress = (pressed: Tool) => {
+    if (pressed === 'move') {
+      // The move tool (Move Image) has no settings popover, so close the pen and eraser popover
+      // and leave opening and closing the image size and delete popover to the parent
+      setSettingsOpen(false);
+      onMoveImagePress();
+      return;
+    }
     setSettingsOpen((open) => (pressed === tool ? !open : true));
   };
 
@@ -389,14 +416,17 @@ export function Toolbar({
         <ChoiceGroup
           label="Tools"
           orientation="vertical"
-          choices={toolChoices(penColor)}
+          choices={toolChoices(penColor, canMoveImage, moveImageButtonRef)}
           value={tool}
           onChange={onToolChange}
           onPress={onToolPress}
         />
       </span>
 
-      <Popover.Root open={settingsOpen} onOpenChange={onSettingsOpenChange}>
+      <Popover.Root
+        open={settingsOpen && tool !== 'move'}
+        onOpenChange={onSettingsOpenChange}
+      >
         <Popover.Portal>
           <Popover.Positioner
             anchor={settingsAnchor}
@@ -446,19 +476,17 @@ export function Toolbar({
       >
         <ImagePlus />
       </Button>
-      {/* While ON, swiping moves the image and a two-finger pinch zooms the image (not the canvas).
-          When turned ON and when the image is clicked, shows the size and delete popover (ImageSettingsPopover) */}
-      <Toggle
-        ref={moveImageButtonRef}
-        size="lg"
-        aria-label="Move Image"
-        pressed={imageMove}
-        disabled={!canMoveImage}
-        onPressedChange={onImageMoveChange}
-      >
-        <Move />
-      </Toggle>
-
+      {/* Opens the camera to take a photo. Hidden when there is no camera (onTakePhoto is null) */}
+      {onTakePhoto && (
+        <Button
+          variant="ghost"
+          size="icon-lg"
+          aria-label="Take Photo"
+          onClick={onTakePhoto}
+        >
+          <Camera />
+        </Button>
+      )}
       <GroupSeparator />
 
       <Button

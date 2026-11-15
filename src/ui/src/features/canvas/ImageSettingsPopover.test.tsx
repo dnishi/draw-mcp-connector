@@ -25,7 +25,7 @@ function Harness(
         onClose={() => setOpen(false)}
         anchor={anchor}
         side="left"
-        ignoreOutsidePressOn={canvas}
+        ignoreOutsidePressOn={[canvas]}
         imageScale={100}
         onImageScaleChange={vi.fn()}
         onImageScaleCommit={vi.fn()}

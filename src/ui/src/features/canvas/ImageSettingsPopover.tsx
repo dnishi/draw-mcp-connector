@@ -82,16 +82,16 @@ type ImageSettingsPopoverProps = ImageSettingsProps & {
   /** Which side of the anchor to show it on (left for the button, below for a clicked point; the opposite side if it does not fit) */
   side: 'bottom' | 'left';
   /**
-   * Pressing here (the canvas) does not close it. Clicks on the canvas are handled by the parent
-   * (shown again on the image; closed outside the image or when moving starts)
+   * Pressing these doesn't close it. The parent decides what a press does
+   * (canvas: reopens on the image, closes outside it or when dragging starts. Move Image: toggles it)
    */
-  ignoreOutsidePressOn: RefObject<HTMLElement | null>;
+  ignoreOutsidePressOn: readonly RefObject<HTMLElement | null>[];
 };
 
 /**
- * Popover for the image size and delete in move mode.
- * Shown next to the button when move mode is turned on with the "Move Image" button, and when the image is clicked,
- * near the clicked point (so it stays on screen even when the image fills the paper)
+ * The popover for the image size and delete, with the move tool (Move Image).
+ * Shown beside the button when Move Image is selected, or near the clicked point when the image is clicked
+ * (so it stays on screen even when the image fills the paper)
  */
 export function ImageSettingsPopover({
   open,
@@ -113,7 +113,7 @@ export function ImageSettingsPopover({
     if (
       reason === 'outside-press' &&
       target instanceof Node &&
-      ignoreOutsidePressOn.current?.contains(target)
+      ignoreOutsidePressOn.some((ref) => ref.current?.contains(target))
     ) {
       return;
     }

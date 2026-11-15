@@ -2,21 +2,19 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Separator } from '@/components/ui/separator';
 import type { ConnectionInfo } from '../sync/connectionInfo';
 import { useBridgeSync } from '../sync/useBridgeSync';
+import { CameraDialog } from './CameraDialog';
+import { useCameraAvailable } from './camera';
 import { ConnectionStatusBadge } from './ConnectionStatusBadge';
 import { SupersededDialog } from './SupersededDialog';
 import { BLACK } from './color';
 import { useCustomColor } from './customColor';
 import { useFingerDrawing } from './fingerDrawing';
 import { ERASER_SIZE } from './erase';
-import {
-  encodeImageFile,
-  initialPlacement,
-  resizePlacement,
-} from './imageImport';
+import { encodeImage, initialPlacement, resizePlacement } from './imageImport';
 import { ImageSettingsPopover } from './ImageSettingsPopover';
 import { ImageStore } from './imageStore';
 import { newStrokeId } from './strokeId';
-import type { EraserMode, Tool } from './types';
+import type { DrawingTool, EraserMode, Tool } from './types';
 import { Toolbar } from './Toolbar';
 import { useCanvasDrawing } from './useCanvasDrawing';
 import { isInitialView } from './view';
@@ -37,15 +35,18 @@ export function CanvasPage({ connectionInfo = null }: CanvasPageProps) {
   const fingerDrawing = useFingerDrawing();
   const [eraserMode, setEraserMode] = useState<EraserMode>('stroke');
   const [eraserSize, setEraserSize] = useState<number>(ERASER_SIZE.initial);
-  const [imageMove, setImageMove] = useState(false);
+  /** The tool used before Move Image was selected. Restored when the image is gone */
+  const [lastDrawingTool, setLastDrawingTool] = useState<DrawingTool>('pen');
   /**
    * Where the image size and delete popover is anchored (null when closed).
-   * The button when move mode was turned on with the "Move Image" button; the point when the image was clicked
+   * The button when Move Image is selected, or the clicked point when the image is clicked
    */
   const [imageSettingsAt, setImageSettingsAt] =
     useState<ImageSettingsAnchor | null>(null);
   const moveImageButtonRef = useRef<HTMLButtonElement>(null);
   const [importError, setImportError] = useState<string | null>(null);
+  const cameraAvailable = useCameraAvailable();
+  const [cameraOpen, setCameraOpen] = useState(false);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   // Image bytes and decoded bitmaps (only this page has them; like strokes, they are gone when the tab is closed)
@@ -76,7 +77,6 @@ export function CanvasPage({ connectionInfo = null }: CanvasPageProps) {
       eraserMode,
       eraserSize,
       fingerDrawing: fingerDrawing.enabled,
-      imageMove,
     },
     images,
     fingerDrawing.onPenDetected,
@@ -98,10 +98,36 @@ export function CanvasPage({ connectionInfo = null }: CanvasPageProps) {
     });
   const notice = error ?? importError ?? message;
 
-  /** Import: re-encode into PNG, store it, place it in the middle of the paper and send it to the PC */
-  const importImage = async (file: File) => {
+  /** Changes the tool (Toolbar's onToolChange) */
+  const changeTool = (next: Tool) => {
+    setTool(next);
+    if (next !== 'move') {
+      // Remember the drawing tool (to return to when the image is gone)
+      setLastDrawingTool(next);
+      // Left the move tool, so close the image popover
+      setImageSettingsAt(null);
+    }
+  };
+
+  /**
+   * When Move Image is pressed. If it isn't selected, opens the popover at the button;
+   * if it is, toggles the popover (closes it when open, opens it when closed).
+   * Pressing Move Image doesn't close the popover as an outside press (ignoreOutsidePressOn),
+   * so the current open state can be used here.
+   * Why `tool` of this render is used: the order of the ToggleGroup value change (onToolChange)
+   * and this onClick isn't guaranteed, so whether the move tool was selected is read from
+   * `tool` at the time of the press (this render)
+   */
+  const onMoveImagePress = () => {
+    setImageSettingsAt((at) =>
+      tool === 'move' && at !== null ? null : { kind: 'button' },
+    );
+  };
+
+  /** Import: re-encode as PNG, store it, place it at the center of the paper and send it to the PC */
+  const importImage = async (source: Blob | HTMLVideoElement) => {
     try {
-      const { png, natural } = await encodeImageFile(file);
+      const { png, natural } = await encodeImage(source);
       const id = newStrokeId();
       images.put(id, png);
       setImage(initialPlacement(natural, page, id));
@@ -128,13 +154,13 @@ export function CanvasPage({ connectionInfo = null }: CanvasPageProps) {
     return () => window.removeEventListener('paste', onPaste);
   }, []);
 
-  // Turn off move mode when the image is gone (delete, clear, redo, including changes from the PC).
-  // Rather than watching in an effect, fix it during render by comparing with the previous value (the form React recommends)
+  // When the image is gone (deleted, cleared, undone, including from the PC), return from the move tool
+  // to the previous tool. Compare with the previous value during render rather than watching it in an effect (the form React recommends)
   const [prevImage, setPrevImage] = useState(image);
   if (prevImage !== image) {
     setPrevImage(image);
-    if (!image) {
-      setImageMove(false);
+    if (!image && tool === 'move') {
+      setTool(lastDrawingTool);
     }
   }
 
@@ -193,8 +219,8 @@ export function CanvasPage({ connectionInfo = null }: CanvasPageProps) {
           ref={canvasRef}
           aria-label="Canvas"
           data-tool={tool}
-          // Mouse on a PC: crosshair for the pen; for the eraser, hide the OS pointer and show the eraser circle (the div below)
-          className="absolute inset-0 size-full touch-none bg-white data-[tool=eraser]:cursor-none data-[tool=pen]:cursor-crosshair"
+          // Mouse on a PC: a crosshair for the pen; for the eraser, hide the OS pointer and show the eraser circle (the div below); a move cursor for the move tool
+          className="absolute inset-0 size-full touch-none bg-white data-[tool=eraser]:cursor-none data-[tool=move]:cursor-move data-[tool=pen]:cursor-crosshair"
           {...pointerHandlers}
         />
         {/* Eraser circle (with a mouse while the eraser is selected, with a pen while tracing to erase). useCanvasDrawing writes its position and size directly */}
@@ -205,7 +231,7 @@ export function CanvasPage({ connectionInfo = null }: CanvasPageProps) {
           aria-hidden
           className="pointer-events-none absolute top-0 left-0 rounded-full border border-neutral-500 bg-white/40"
         />
-        {/* Dashed frame showing the image position and size in move mode. useCanvasDrawing rewrites its position and size directly */}
+        {/* While the move tool (Move Image) is selected, a dashed frame shows the image position and size. useCanvasDrawing writes the position and size directly */}
         <div
           ref={imageFrameRef}
           data-testid="image-frame"
@@ -226,13 +252,13 @@ export function CanvasPage({ connectionInfo = null }: CanvasPageProps) {
           }}
         />
 
-        {/* Closes when move mode is turned OFF (including when the image is deleted) */}
+        {/* Closed unless the move tool is selected (including when the image is deleted) */}
         <ImageSettingsPopover
-          open={imageSettingsAt !== null && imageMove}
+          open={imageSettingsAt !== null && tool === 'move'}
           onClose={() => setImageSettingsAt(null)}
           anchor={imageSettingsAnchor}
           side={imageSettingsAt?.kind === 'point' ? 'bottom' : 'left'}
-          ignoreOutsidePressOn={canvasRef}
+          ignoreOutsidePressOn={[canvasRef, moveImageButtonRef]}
           imageScale={imageScale}
           onImageScaleChange={(percent) => applyScale(percent, false)}
           onImageScaleCommit={(percent) => applyScale(percent, true)}
@@ -259,7 +285,7 @@ export function CanvasPage({ connectionInfo = null }: CanvasPageProps) {
         <Separator />
         <Toolbar
           tool={tool}
-          onToolChange={setTool}
+          onToolChange={changeTool}
           fingerDrawing={fingerDrawing.enabled}
           onFingerDrawingChange={fingerDrawing.setEnabled}
           penColor={penColor}
@@ -276,17 +302,23 @@ export function CanvasPage({ connectionInfo = null }: CanvasPageProps) {
           canClear={canClear}
           onClear={clear}
           onImport={() => fileInputRef.current?.click()}
-          imageMove={imageMove}
-          onImageMoveChange={(enabled) => {
-            setImageMove(enabled);
-            setImageSettingsAt(enabled ? { kind: 'button' } : null);
-          }}
+          onTakePhoto={cameraAvailable ? () => setCameraOpen(true) : null}
+          onMoveImagePress={onMoveImagePress}
           moveImageButtonRef={moveImageButtonRef}
           canMoveImage={image !== null}
         />
       </aside>
 
       <SupersededDialog open={superseded} onClose={dismissSuperseded} />
+      {/* Close after the import finishes (closing stops the camera, so don't stop it before the frame is read) */}
+      <CameraDialog
+        open={cameraOpen}
+        onClose={() => setCameraOpen(false)}
+        onCapture={async (video) => {
+          await importImage(video);
+          setCameraOpen(false);
+        }}
+      />
     </main>
   );
 }

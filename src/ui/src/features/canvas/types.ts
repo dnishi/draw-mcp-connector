@@ -1,4 +1,8 @@
-export type Tool = 'pen' | 'eraser';
+/** move moves the image: a one-finger swipe moves it and a two-finger pinch resizes it */
+export type Tool = 'pen' | 'eraser' | 'move';
+
+/** The drawing tools. Where the move tool returns to when the image is gone */
+export type DrawingTool = Exclude<Tool, 'move'>;
 
 /** How the eraser erases. stroke erases every stroke it touches; partial erases only the traced part */
 export type EraserMode = 'stroke' | 'partial';
@@ -13,8 +17,6 @@ export interface ToolSettings {
   eraserSize: number;
   /** Whether one finger draws (erases). Two fingers always pinch */
   fingerDrawing: boolean;
-  /** Whether the image is in move mode. When ON, a one-finger swipe moves the image and a two-finger pinch zooms the image */
-  imageMove: boolean;
 }
 
 export type ConnectionStatus =

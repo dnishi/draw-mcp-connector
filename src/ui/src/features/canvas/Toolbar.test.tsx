@@ -19,8 +19,8 @@ function createHistory(overrides: Partial<History> = {}): History {
 function createImageProps() {
   return {
     onImport: vi.fn(),
-    imageMove: false,
-    onImageMoveChange: vi.fn(),
+    onTakePhoto: null,
+    onMoveImagePress: vi.fn(),
     canMoveImage: false,
   };
 }
@@ -51,12 +51,11 @@ function renderToolbar(props: Partial<ComponentProps<typeof Toolbar>> = {}) {
   return all;
 }
 
-/** Remembers the selected tool and move mode (held outside Toolbar, like CanvasPage) */
+/** Remembers the selected tool (held outside Toolbar, like CanvasPage) */
 function StatefulToolbar(props: Partial<ComponentProps<typeof Toolbar>>) {
   const [tool, setTool] = useState<ComponentProps<typeof Toolbar>['tool']>(
     props.tool ?? 'pen',
   );
-  const [imageMove, setImageMove] = useState(props.imageMove ?? false);
   return (
     <Toolbar
       fingerDrawing
@@ -78,8 +77,6 @@ function StatefulToolbar(props: Partial<ComponentProps<typeof Toolbar>>) {
       {...props}
       tool={tool}
       onToolChange={setTool}
-      imageMove={imageMove}
-      onImageMoveChange={setImageMove}
     />
   );
 }
@@ -290,23 +287,76 @@ describe('Toolbar', () => {
       expect(onImport).toHaveBeenCalledOnce();
     });
 
-    it('画像が置いてなければ、移動モードにはできない', () => {
+    it('カメラがなければ(null)「Take Photo」のボタンは無い', () => {
+      renderToolbar({ onTakePhoto: null });
+
+      expect(
+        screen.queryByRole('button', { name: 'Take Photo' }),
+      ).not.toBeInTheDocument();
+    });
+
+    it('カメラがあれば「Import Image」の下に「Take Photo」が出て、押すとカメラで撮る画面を開く', async () => {
+      const { onTakePhoto } = renderToolbar({ onTakePhoto: vi.fn() });
+
+      const order = within(
+        screen.getByRole('toolbar', { name: 'Drawing Tools' }),
+      )
+        .getAllByRole('button')
+        .map((button) => button.getAttribute('aria-label'));
+      expect(order.indexOf('Take Photo')).toBe(
+        order.indexOf('Import Image') + 1,
+      );
+
+      await userEvent.click(screen.getByRole('button', { name: 'Take Photo' }));
+      expect(onTakePhoto).toHaveBeenCalledOnce();
+    });
+
+    it('「Move Image」は「Tools」の組(ペン・消しゴム)の中にある', () => {
+      renderToolbar({ canMoveImage: true });
+
+      const tools = within(screen.getByRole('group', { name: 'Tools' }));
+      expect(
+        tools.getByRole('button', { name: 'Move Image' }),
+      ).toBeInTheDocument();
+    });
+
+    it('画像が置いてなければ、移動ツールにはできない', () => {
       renderToolbar({ canMoveImage: false });
 
       expect(moveButton()).toBeDisabled();
     });
 
-    // Move mode is remembered outside, like CanvasPage, so press it with StatefulToolbar.
-    // The size and delete popover appears near the image when it is clicked (ImageSettingsPopover)
-    it('移動モードに切り替えるだけで、吹き出しは出さない', async () => {
-      render(<StatefulToolbar canMoveImage />);
+    it('押すと onToolChange("move") と onMoveImagePress が呼ばれ、ペン・消しゴムの設定の吹き出しは出ない', async () => {
+      const { onToolChange, onMoveImagePress } = renderToolbar({
+        canMoveImage: true,
+      });
 
       await userEvent.click(moveButton());
 
-      expect(moveButton()).toHaveAttribute('aria-pressed', 'true');
+      expect(onToolChange).toHaveBeenCalledWith('move');
+      expect(onMoveImagePress).toHaveBeenCalledOnce();
       expect(
-        screen.queryByRole('dialog', { name: 'Image Settings' }),
+        screen.queryByRole('dialog', { name: 'Pen Settings' }),
       ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole('dialog', { name: 'Eraser Settings' }),
+      ).not.toBeInTheDocument();
+    });
+
+    it('tool="move" のとき、Pen・Eraser は選ばれていない表示で、Move Image は選ばれている', async () => {
+      const { onToolChange } = renderToolbar({
+        tool: 'move',
+        canMoveImage: true,
+      });
+      const pen = screen.getByRole('button', { name: 'Pen' });
+      const eraser = screen.getByRole('button', { name: 'Eraser' });
+
+      expect(moveButton()).toHaveAttribute('aria-pressed', 'true');
+      expect(pen).toHaveAttribute('aria-pressed', 'false');
+      expect(eraser).toHaveAttribute('aria-pressed', 'false');
+
+      await userEvent.click(pen);
+      expect(onToolChange).toHaveBeenCalledWith('pen');
     });
   });
 

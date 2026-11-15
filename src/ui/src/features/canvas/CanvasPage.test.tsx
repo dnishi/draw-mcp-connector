@@ -1,4 +1,5 @@
 import {
+  act,
   fireEvent,
   render,
   screen,
@@ -93,7 +94,7 @@ describe('CanvasPage', () => {
       });
     };
 
-    it('ファイルを選ぶと画像が置いてあり、移動モードが使えるようになる', async () => {
+    it('ファイルを選ぶと画像が置いてあり、「Move Image」が使えるようになる', async () => {
       render(<CanvasPage />);
       expect(screen.getByRole('button', { name: 'Move Image' })).toBeDisabled();
 
@@ -153,16 +154,65 @@ describe('CanvasPage', () => {
         await waitFor(() => expect(moveButton()).toBeEnabled());
       };
 
-      it('「Move Image」で移動モードにすると出し、OFF にすると閉じる', async () => {
+      it('Move Image を選ぶと吹き出しが出て、Pen は選ばれていない表示になる。もう一度押すと閉じ、移動は選ばれたまま', async () => {
         await placeImage();
+        const pen = screen.getByRole('button', { name: 'Pen' });
 
         await userEvent.click(moveButton());
         expect(
           await screen.findByRole('dialog', { name: 'Image Settings' }),
         ).toBeInTheDocument();
+        expect(pen).toHaveAttribute('aria-pressed', 'false');
+        expect(moveButton()).toHaveAttribute('aria-pressed', 'true');
 
         await userEvent.click(moveButton());
         await waitFor(() => expect(popup()).not.toBeInTheDocument());
+        expect(moveButton()).toHaveAttribute('aria-pressed', 'true');
+      });
+
+      it('キーボード(Enter)で Move Image を押しても、吹き出しを開け閉めできる', async () => {
+        await placeImage();
+
+        moveButton().focus();
+        await userEvent.keyboard('{Enter}');
+        await screen.findByRole('dialog', { name: 'Image Settings' });
+
+        moveButton().focus();
+        await userEvent.keyboard('{Enter}');
+        await waitFor(() => expect(popup()).not.toBeInTheDocument());
+        expect(moveButton()).toHaveAttribute('aria-pressed', 'true');
+      });
+
+      it('移動を選んでいる間に Pen を押すと、Pen が選ばれ、吹き出しが閉じる', async () => {
+        await placeImage();
+        await userEvent.click(moveButton());
+        await screen.findByRole('dialog', { name: 'Image Settings' });
+
+        await userEvent.click(screen.getByRole('button', { name: 'Pen' }));
+
+        await waitFor(() => expect(popup()).not.toBeInTheDocument());
+        expect(screen.getByRole('button', { name: 'Pen' })).toHaveAttribute(
+          'aria-pressed',
+          'true',
+        );
+        expect(moveButton()).toHaveAttribute('aria-pressed', 'false');
+      });
+
+      it('Eraser → Move Image と選んだ後に画像を削除すると、Eraser に戻る', async () => {
+        await placeImage();
+        await userEvent.click(screen.getByRole('button', { name: 'Eraser' }));
+        await userEvent.click(moveButton());
+        await screen.findByRole('dialog', { name: 'Image Settings' });
+
+        await userEvent.click(
+          screen.getByRole('button', { name: 'Delete Image' }),
+        );
+
+        expect(screen.getByRole('button', { name: 'Eraser' })).toHaveAttribute(
+          'aria-pressed',
+          'true',
+        );
+        expect(moveButton()).toBeDisabled();
       });
 
       it('画像をクリックすると出し、もう一度クリックしても閉じず、画像の外のクリックで閉じる', async () => {
@@ -196,6 +246,50 @@ describe('CanvasPage', () => {
       await waitFor(() => expect(createImageBitmap).toHaveBeenCalled());
 
       expect(screen.getByRole('button', { name: 'Move Image' })).toBeDisabled();
+    });
+  });
+
+  describe('カメラで撮る(Take Photo)', () => {
+    // jsdom has no navigator.mediaDevices, so put a fake one with a videoinput
+    function installMediaDevices(videoInputs: number) {
+      Object.defineProperty(navigator, 'mediaDevices', {
+        configurable: true,
+        value: {
+          enumerateDevices: async () =>
+            Array.from(
+              { length: videoInputs },
+              () => ({ kind: 'videoinput' }) as MediaDeviceInfo,
+            ),
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+        },
+      });
+    }
+
+    afterEach(() => {
+      Object.defineProperty(navigator, 'mediaDevices', {
+        configurable: true,
+        value: undefined,
+      });
+    });
+
+    it('videoinput がある偽の mediaDevices を置くと「Take Photo」が出る', async () => {
+      installMediaDevices(1);
+      render(<CanvasPage />);
+
+      expect(
+        await screen.findByRole('button', { name: 'Take Photo' }),
+      ).toBeInTheDocument();
+    });
+
+    it('mediaDevices が無ければ「Take Photo」は出ない', async () => {
+      render(<CanvasPage />);
+      // Wait until the recount (countCameras) finishes
+      await act(async () => {});
+
+      expect(
+        screen.queryByRole('button', { name: 'Take Photo' }),
+      ).not.toBeInTheDocument();
     });
   });
 

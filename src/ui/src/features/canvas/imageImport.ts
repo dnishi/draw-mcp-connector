@@ -11,12 +11,13 @@ export interface ImportedSize {
 
 /**
  * Re-encodes an imported image into PNG, shrinking the longer side to the limit.
- * The format is unified to PNG, so the PC (bridge) side only has to read PNG
+ * The format is unified to PNG, so the PC (bridge) side only has to read PNG.
+ * Works from both an image file (Blob) and the current frame of the camera video (HTMLVideoElement)
  */
-export async function encodeImageFile(
-  file: Blob,
+export async function encodeImage(
+  source: Blob | HTMLVideoElement,
 ): Promise<{ png: Uint8Array; natural: ImportedSize }> {
-  const bitmap = await createImageBitmap(file);
+  const bitmap = await createImageBitmap(source);
   const shrink = Math.min(
     1,
     MAX_IMAGE_SIDE / bitmap.width,

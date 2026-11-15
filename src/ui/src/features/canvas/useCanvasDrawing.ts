@@ -43,12 +43,12 @@ import {
 /** Radius of the whole-stroke eraser (CSS pixels on the view) */
 const STROKE_ERASER_RADIUS = 12;
 /**
- * In move mode, a press and release that moves less than this (screen CSS pixels) is a click.
+ * With the move tool (Move Image), a press and release that moves less than this (screen CSS pixels) is a click.
  * The image does not move until it is exceeded (so small finger or pen jitter does not turn a click into a move)
  */
 const CLICK_SLOP = 4;
 
-/** Reports image operations in move mode (opens and closes the popover near the image) */
+/** Reports image operations with the move tool (Move Image) (opens and closes the popover near the image) */
 export interface ImageEvents {
   /** Pressed and released on the image without moving. at is the release point (page coordinates, clientX / clientY) */
   onClick(at: { x: number; y: number }): void;
@@ -101,7 +101,7 @@ type ImageGesture = {
   working: ImagePlacement;
 };
 
-/** Zooming the image with a pinch in move mode */
+/** Zooming the image with a pinch with the move tool (Move Image) */
 type ImagePinch = {
   /** Distance between the two fingers when the pinch started (0 until the first move) */
   startSpread: number;
@@ -111,7 +111,7 @@ type ImagePinch = {
   working: ImagePlacement;
 };
 
-/** Ratio to the original size allowed for a pinch in move mode */
+/** Ratio to the original size allowed for a pinch with the move tool (Move Image) */
 const IMAGE_SCALE_RANGE = { min: 0.05, max: 4 };
 
 /** Strokes visible while the eraser moves (the remaining pieces replace the erased strokes) */
@@ -148,21 +148,15 @@ function coalescedEvents(event: PointerEvent): PointerEvent[] {
 
 export function useCanvasDrawing(
   canvasRef: RefObject<HTMLCanvasElement | null>,
-  {
-    tool,
-    penColor,
-    eraserMode,
-    eraserSize,
-    fingerDrawing,
-    imageMove,
-  }: ToolSettings,
+  { tool, penColor, eraserMode, eraserSize, fingerDrawing }: ToolSettings,
   /** Image bytes and decoded bitmaps */
   images: ImageStore,
   /** When a pen is used (to switch finger drawing automatically) */
   onPenDetected: () => void,
-  /** When the image is clicked or starts moving in move mode */
+  /** When the image is clicked or starts moving with the move tool (Move Image) */
   imageEvents: ImageEvents = NO_IMAGE_EVENTS,
 ) {
+  const imageMove = tool === 'move';
   const { renderer, error } = useStrokeRenderer(canvasRef);
   const [state, dispatch] = useReducer(
     strokeHistoryReducer,
@@ -178,7 +172,7 @@ export function useCanvasDrawing(
   /** The image being moved (not put into state until release) */
   const imageGestureRef = useRef<ImageGesture | null>(null);
   const imagePinchRef = useRef<ImagePinch | null>(null);
-  /** Div showing the image frame in move mode (requestRender rewrites its position and size directly) */
+  /** Div showing the image frame while the move tool (Move Image) is selected (requestRender rewrites its position and size directly) */
   const imageFrameRef = useRef<HTMLDivElement>(null);
   const imageMoveRef = useRef(imageMove);
   // So React does not re-render during a pinch, the view is held in a ref and put into state when the pinch ends
@@ -190,7 +184,7 @@ export function useCanvasDrawing(
   // Used by pinch handling (reads the latest size from functions recreated on every pointer event)
   const pageRef = useRef(page);
 
-  /** Shows the image frame with a dashed line in move mode (moved in the same coordinate system as the canvas) */
+  /** Shows the image frame with a dashed line while the move tool (Move Image) is selected (moved in the same coordinate system as the canvas) */
   const updateImageFrame = useCallback((placement: ImagePlacement | null) => {
     const frame = imageFrameRef.current;
     if (!frame) {
@@ -406,7 +400,7 @@ export function useCanvasDrawing(
 
   const spread = ([a, b]: FingerPair) => Math.hypot(b.x - a.x, b.y - a.y);
 
-  /** Pinch in move mode: zooms the image by the finger distance ratio, keeping its center */
+  /** Pinch with the move tool (Move Image): zooms the image by the finger distance ratio, keeping its center */
   const moveImagePinch = (before: FingerPair, after: FingerPair) => {
     const pinch = imagePinchRef.current;
     if (!pinch) {
@@ -456,7 +450,7 @@ export function useCanvasDrawing(
   /**
    * Tracks fingers (touch). With two fingers it zooms and pans with a pinch and returns true (not used for writing).
    * If a second finger touches while writing with one, the stroke in progress is canceled and it becomes a pinch.
-   * In move mode the pinch zooms the image instead of the canvas
+   * With the move tool (Move Image) the pinch zooms the image instead of the canvas
    */
   const handleTouch = (
     event: ReactPointerEvent<HTMLCanvasElement>,
@@ -516,7 +510,7 @@ export function useCanvasDrawing(
     }
   };
 
-  /** Starts moving the image with one pointer (finger, mouse or pen) in move mode */
+  /** Starts moving the image with one pointer (finger, mouse or pen) with the move tool (Move Image) */
   const startImageMove = (event: ReactPointerEvent<HTMLCanvasElement>) => {
     const placement = imageRef.current;
     if (!placement) {
@@ -549,7 +543,7 @@ export function useCanvasDrawing(
       onPenDetected();
     }
     // Handle the pinch check first for fingers (placed before the writing check so that even with
-    // "Draw with Finger" OFF, one finger can move the image in move mode)
+    // "Draw with Finger" OFF, one finger can move the image with the move tool (Move Image))
     if (event.pointerType === 'touch' && handleTouch(event)) {
       return;
     }
@@ -561,9 +555,12 @@ export function useCanvasDrawing(
     ) {
       return;
     }
-    // In move mode, one finger (including mouse and pen) moves the image
-    if (imageMoveRef.current && imageRef.current) {
-      startImageMove(event);
+    // With the move tool (Move Image), one finger (including mouse and pen) moves the image.
+    // Even without an image, no pen or eraser operation starts
+    if (tool === 'move') {
+      if (imageRef.current) {
+        startImageMove(event);
+      }
       return;
     }
     // When finger drawing is off, do not start writing with a finger

@@ -1,6 +1,6 @@
 import { act, renderHook } from '@testing-library/react';
 import type { PointerEvent as ReactPointerEvent, RefObject } from 'react';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ImagePlacement } from '../sync/protocol';
 import { ImageStore } from './imageStore';
 import { useCanvasDrawing } from './useCanvasDrawing';
@@ -37,12 +37,11 @@ const pointerEvent = (
   }) as unknown as ReactPointerEvent<HTMLCanvasElement>;
 
 const baseSettings: ToolSettings = {
-  tool: 'pen',
+  tool: 'move',
   penColor: '#000000',
   eraserMode: 'stroke',
   eraserSize: 8,
   fingerDrawing: false,
-  imageMove: true,
 };
 
 const placement = (id: string, x = 10, y = 10): ImagePlacement => ({
@@ -62,8 +61,11 @@ function setup(settings = baseSettings) {
     onClickOutside: vi.fn(),
     onGestureStart: vi.fn(),
   };
-  const hook = renderHook(() =>
-    useCanvasDrawing(ref, settings, images, vi.fn(), imageEvents),
+  // Passed as initialProps so that rerender can change the tool
+  const hook = renderHook(
+    (next: ToolSettings) =>
+      useCanvasDrawing(ref, next, images, vi.fn(), imageEvents),
+    { initialProps: settings },
   );
   const event = (init: FakeEventInit) => pointerEvent(canvas, init);
   /** Presses, moves and releases with one pointer (mouse) */
@@ -82,7 +84,12 @@ function setup(settings = baseSettings) {
 }
 
 describe('useCanvasDrawing', () => {
-  it('「指で書く」が OFF でも、移動モードなら 1 本指で画像が動く', () => {
+  // The stand-in div for the eraser circle is made here, so remove it after the test
+  afterEach(() => {
+    document.body.querySelector('[data-testid="eraser-cursor"]')?.remove();
+  });
+
+  it('「指で書く」が OFF でも、移動ツール(Move Image)なら 1 本指で画像が動く', () => {
     const { result, event } = setup();
     act(() => result.current.setImage(placement('img')));
 
@@ -127,7 +134,7 @@ describe('useCanvasDrawing', () => {
     ]);
   });
 
-  describe('移動モードでのクリック(画像のそばの吹き出しを出す)', () => {
+  describe('移動ツール(Move Image)でのクリック(画像のそばの吹き出しを出す)', () => {
     it('画像の上を動かさずに押して離すとクリックとして知らせ、画像は動かさない', () => {
       const { result, imageEvents, press } = setup();
       act(() => result.current.setImage(placement('img')));
@@ -196,8 +203,8 @@ describe('useCanvasDrawing', () => {
     });
   });
 
-  it('「指で書く」が OFF で移動モードでなければ、指では書かない', () => {
-    const { result, event } = setup({ ...baseSettings, imageMove: false });
+  it('「指で書く」が OFF で移動ツール(Move Image)でなければ、指では書かない', () => {
+    const { result, event } = setup({ ...baseSettings, tool: 'pen' });
 
     act(() =>
       result.current.pointerHandlers.onPointerDown(
@@ -226,8 +233,52 @@ describe('useCanvasDrawing', () => {
     expect(result.current.canClear).toBe(false);
   });
 
+  it('tool: "move" で画像が無いとき、押して動かしても筆跡が増えない', () => {
+    const { result, press } = setup();
+
+    press({ x: 10, y: 10 }, { x: 40, y: 40 });
+
+    expect(result.current.outgoing).toEqual([]);
+    expect(result.current.canClear).toBe(false);
+  });
+
+  it('tool: "eraser" から tool: "move" にして、マウスで動かしても消しゴムの円が出ない', () => {
+    const { result, rerender, event } = setup({
+      ...baseSettings,
+      tool: 'eraser',
+    });
+    // The eraser circle is a div in CanvasPage, so attach a stand-in here
+    const cursor = document.createElement('div');
+    cursor.setAttribute('data-testid', 'eraser-cursor');
+    document.body.appendChild(cursor);
+    result.current.eraserCursorRef.current = cursor;
+
+    const hover = (x: number, y: number) =>
+      act(() =>
+        result.current.pointerHandlers.onPointerMove(
+          event({
+            type: 'pointermove',
+            pointerType: 'mouse',
+            pointerId: 1,
+            x,
+            y,
+          }),
+        ),
+      );
+
+    hover(50, 40);
+    expect(cursor).toBeVisible();
+
+    act(() => {
+      rerender({ ...baseSettings, tool: 'move' });
+    });
+    hover(60, 50);
+
+    expect(cursor).not.toBeVisible();
+  });
+
   it('画像は、取り消しで戻れるものは残し、クリアすると全部捨てる', () => {
-    const { result, images } = setup({ ...baseSettings, imageMove: false });
+    const { result, images } = setup({ ...baseSettings, tool: 'pen' });
     images.put('a', new Uint8Array([1]));
     act(() => result.current.setImage(placement('a')));
     images.put('b', new Uint8Array([2]));
