@@ -26,7 +26,9 @@ function distanceBetweenSegments(
 ): number {
   const crosses =
     cross(a, b, c) * cross(a, b, d) < 0 && cross(c, d, a) * cross(c, d, b) < 0;
-  if (crosses) return 0;
+  if (crosses) {
+    return 0;
+  }
   return Math.min(
     distanceToSegment(a, c, d),
     distanceToSegment(b, c, d),
@@ -141,7 +143,9 @@ export function eraseAlong(
     radius + radiusAt(Math.max(a.pressure, b.pressure));
 
   const marked = densifyNear(stroke.points, isNear);
-  if (!marked.some(({ point }) => isErased(point))) return null;
+  if (!marked.some(({ point }) => isErased(point))) {
+    return null;
+  }
 
   // Split into runs of points that are not erased. A run with only one point is a fragment at a cut, so drop it
   const runs: MarkedPoint[][] = [];
@@ -151,10 +155,14 @@ export function eraseAlong(
       run.push(m);
       continue;
     }
-    if (run.length >= 2) runs.push(run);
+    if (run.length >= 2) {
+      runs.push(run);
+    }
     run = [];
   }
-  if (run.length >= 2) runs.push(run);
+  if (run.length >= 2) {
+    runs.push(run);
+  }
 
   // What remains keeps the author and color of the original stroke
   return runs.map((points) => ({

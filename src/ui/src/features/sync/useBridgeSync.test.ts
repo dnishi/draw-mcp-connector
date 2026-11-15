@@ -6,10 +6,12 @@ import type { ConnectionInfo } from './connectionInfo';
 import type {
   CanvasOp,
   ClientMessage,
+  ImagePlacement,
   ServerMessage,
   Viewport,
 } from './protocol';
 import { RESUME_KEY_STORAGE_KEY } from './resumeKey';
+import type { ImageBytes } from './useBridgeSync';
 import { useBridgeSync } from './useBridgeSync';
 
 vi.mock('./bridgeClient', () => ({ connectBridge: vi.fn() }));
@@ -22,14 +24,28 @@ const info: ConnectionInfo = {
 
 let handlers: BridgeHandlers;
 let sent: ClientMessage[];
+let sentImageBytes: [string, Uint8Array][];
+let requestedImages: string[];
+let imageStore: ImageBytes & { seed(id: string, bytes: Uint8Array): void };
 
 beforeEach(() => {
   sent = [];
+  sentImageBytes = [];
+  requestedImages = [];
   sessionStorage.clear();
+  const bytes = new Map<string, Uint8Array>();
+  imageStore = {
+    has: (id) => bytes.has(id),
+    get: (id) => bytes.get(id),
+    put: (id, value) => void bytes.set(id, value),
+    seed: (id, value) => void bytes.set(id, value),
+  };
   vi.mocked(connectBridge).mockImplementation(async (_, h) => {
     handlers = h;
     const connection: BridgeConnection = {
       send: (message) => sent.push(message),
+      sendImageBytes: (id, value) => sentImageBytes.push([id, value]),
+      requestImageBytes: (id) => requestedImages.push(id),
       close: () => {},
     };
     return connection;
@@ -45,7 +61,14 @@ function setup(outgoing: readonly CanvasOp[] = []) {
   const applyRemote = vi.fn();
   const hook = renderHook(
     ({ outgoing, viewport }) =>
-      useBridgeSync({ info, viewport, page, outgoing, applyRemote }),
+      useBridgeSync({
+        info,
+        viewport,
+        page,
+        outgoing,
+        applyRemote,
+        images: imageStore,
+      }),
     { initialProps: { outgoing, viewport: unchanged } },
   );
   return { ...hook, applyRemote };
@@ -173,10 +196,129 @@ describe('useBridgeSync', () => {
         page,
         outgoing: [],
         applyRemote: vi.fn(),
+        images: imageStore,
       }),
     );
 
     expect(result.current.status).toBe('disconnected');
     expect(result.current.reconnect).toBeNull();
+  });
+
+  describe('画像のバイト列(JSON とは別のストリーム)', () => {
+    const placement: ImagePlacement = {
+      id: 'img',
+      x: 1,
+      y: 2,
+      width: 30,
+      height: 20,
+    };
+
+    it('自分の setImage は、先にバイト列を一方向ストリームで送る', async () => {
+      const { rerender } = setup();
+      await waitFor(() => expect(sent).toHaveLength(1));
+      await receive({ type: 'snapshot', strokes: [] });
+      imageStore.seed('img', new Uint8Array([1, 2, 3]));
+
+      rerender({
+        outgoing: [{ type: 'setImage', image: placement }],
+        viewport: unchanged,
+      });
+
+      expect(sentImageBytes).toEqual([['img', new Uint8Array([1, 2, 3])]]);
+      expect(sent.at(-1)).toEqual({
+        type: 'op',
+        op: { type: 'setImage', image: placement },
+      });
+    });
+
+    it('同じ画像を動かしても、バイト列は最初の1回だけ送る', async () => {
+      const { rerender } = setup();
+      await waitFor(() => expect(sent).toHaveLength(1));
+      await receive({ type: 'snapshot', strokes: [] });
+      imageStore.seed('img', new Uint8Array([1, 2, 3]));
+      const moved = { ...placement, x: 50 };
+
+      rerender({
+        outgoing: [{ type: 'setImage', image: placement }],
+        viewport: unchanged,
+      });
+      rerender({
+        outgoing: [{ type: 'setImage', image: moved }],
+        viewport: unchanged,
+      });
+
+      expect(sentImageBytes).toHaveLength(1);
+      expect(sent.at(-1)).toEqual({
+        type: 'op',
+        op: { type: 'setImage', image: moved },
+      });
+    });
+
+    it('bridge から受け取った画像は、動かしてもバイト列を送らない', async () => {
+      const { rerender } = setup();
+      await waitFor(() => expect(sent).toHaveLength(1));
+      await receive({ type: 'snapshot', strokes: [], image: placement });
+      act(() => handlers.onImageBytes('img', new Uint8Array([4])));
+
+      rerender({
+        outgoing: [{ type: 'setImage', image: { ...placement, x: 50 } }],
+        viewport: unchanged,
+      });
+
+      expect(sentImageBytes).toEqual([]);
+    });
+
+    it('bridge に求められたら、持っているバイト列を送る', async () => {
+      setup();
+      await waitFor(() => expect(sent).toHaveLength(1));
+      await receive({ type: 'snapshot', strokes: [] });
+      imageStore.seed('img', new Uint8Array([5]));
+
+      act(() => handlers.onImageRequest('img'));
+      act(() => handlers.onImageRequest('unknown'));
+
+      expect(sentImageBytes).toEqual([['img', new Uint8Array([5])]]);
+    });
+
+    it('bridge の snapshot にあった画像のバイト列を知らなければ、求める', async () => {
+      const { applyRemote } = setup();
+      await waitFor(() => expect(sent).toHaveLength(1));
+
+      await receive({ type: 'snapshot', strokes: [], image: placement });
+
+      expect(applyRemote).toHaveBeenCalledWith({
+        type: 'snapshot',
+        strokes: [],
+        image: placement,
+      });
+      expect(requestedImages).toEqual(['img']);
+    });
+
+    it('他のページが置いた画像のバイト列を知らなければ、求める', async () => {
+      const { applyRemote } = setup();
+      await waitFor(() => expect(sent).toHaveLength(1));
+      await receive({ type: 'snapshot', strokes: [] });
+
+      await receive({ type: 'op', op: { type: 'setImage', image: placement } });
+
+      expect(applyRemote).toHaveBeenCalledWith({
+        type: 'remote',
+        op: { type: 'setImage', image: placement },
+      });
+      expect(requestedImages).toEqual(['img']);
+    });
+
+    it('知っている画像は求めず、受け取ったバイト列は保管する', async () => {
+      setup();
+      await waitFor(() => expect(sent).toHaveLength(1));
+      await receive({ type: 'snapshot', strokes: [] });
+      imageStore.seed('img', new Uint8Array([9]));
+
+      await receive({ type: 'op', op: { type: 'setImage', image: placement } });
+      expect(requestedImages).toEqual([]);
+
+      act(() => handlers.onImageBytes('img2', new Uint8Array([7, 8])));
+      expect(imageStore.get('img2')).toEqual(new Uint8Array([7, 8]));
+    });
   });
 });

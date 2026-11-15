@@ -9,6 +9,8 @@ import {
   type RefObject,
 } from 'react';
 import { eraseAlong } from './erase';
+import { clampPlacement } from './imageImport';
+import type { ImageStore } from './imageStore';
 import {
   hitsStroke,
   type Point,
@@ -23,6 +25,7 @@ import {
   type ErasedPieces,
   type RemoteAction,
 } from './strokeHistory';
+import type { ImagePlacement } from '../sync/protocol';
 import type { EraserMode, History, ToolSettings } from './types';
 import { useStrokeRenderer } from './useStrokeRenderer';
 import {
@@ -31,12 +34,35 @@ import {
   clampView,
   pinchView,
   toCanvasPoint,
+  toScreenPoint,
   visibleRange,
+  type FingerPair,
   type View,
 } from './view';
 
 /** Radius of the whole-stroke eraser (CSS pixels on the view) */
 const STROKE_ERASER_RADIUS = 12;
+/**
+ * In move mode, a press and release that moves less than this (screen CSS pixels) is a click.
+ * The image does not move until it is exceeded (so small finger or pen jitter does not turn a click into a move)
+ */
+const CLICK_SLOP = 4;
+
+/** Reports image operations in move mode (opens and closes the popover near the image) */
+export interface ImageEvents {
+  /** Pressed and released on the image without moving. at is the release point (page coordinates, clientX / clientY) */
+  onClick(at: { x: number; y: number }): void;
+  /** Pressed and released outside the image without moving */
+  onClickOutside(): void;
+  /** Started moving the image (drag or pinch) */
+  onGestureStart(): void;
+}
+
+const NO_IMAGE_EVENTS: ImageEvents = {
+  onClick: () => {},
+  onClickOutside: () => {},
+  onGestureStart: () => {},
+};
 
 /** One operation from putting the pen down to lifting it */
 type Gesture = {
@@ -58,12 +84,44 @@ type Gesture = {
     }
 );
 
-/** Strokes visible while the eraser moves (remaining parts replace the erased strokes) */
+/** One operation that moves the image (from pressing the pointer to releasing it) */
+type ImageGesture = {
+  pointerId: number;
+  /** Canvas point when the press started */
+  origin: Point;
+  /** Screen point when the press started (tells a click from a drag) */
+  downScreen: Point;
+  /** Whether the press was on the image (even a press outside can move the image by dragging) */
+  onImage: boolean;
+  /** Whether it moved beyond CLICK_SLOP. Until then it is treated as a click and the image does not move */
+  dragging: boolean;
+  /** Placement when the operation started */
+  start: ImagePlacement;
+  /** Placement while moving (committed on release) */
+  working: ImagePlacement;
+};
+
+/** Zooming the image with a pinch in move mode */
+type ImagePinch = {
+  /** Distance between the two fingers when the pinch started (0 until the first move) */
+  startSpread: number;
+  /** Placement when the pinch started */
+  start: ImagePlacement;
+  /** Placement while moving (committed when the fingers are lifted) */
+  working: ImagePlacement;
+};
+
+/** Ratio to the original size allowed for a pinch in move mode */
+const IMAGE_SCALE_RANGE = { min: 0.05, max: 4 };
+
+/** Strokes visible while the eraser moves (the remaining pieces replace the erased strokes) */
 function visibleStrokes(
   strokes: readonly Stroke[],
   pieces: ErasedPieces,
 ): readonly Stroke[] {
-  if (pieces.size === 0) return strokes;
+  if (pieces.size === 0) {
+    return strokes;
+  }
   return strokes.flatMap((stroke) => pieces.get(stroke.id) ?? [stroke]);
 }
 
@@ -96,10 +154,14 @@ export function useCanvasDrawing(
     eraserMode,
     eraserSize,
     fingerDrawing,
-    showGrid,
+    imageMove,
   }: ToolSettings,
-  /** Called when a pen is used (to switch finger drawing automatically) */
+  /** Image bytes and decoded bitmaps */
+  images: ImageStore,
+  /** When a pen is used (to switch finger drawing automatically) */
   onPenDetected: () => void,
+  /** When the image is clicked or starts moving in move mode */
+  imageEvents: ImageEvents = NO_IMAGE_EVENTS,
 ) {
   const { renderer, error } = useStrokeRenderer(canvasRef);
   const [state, dispatch] = useReducer(
@@ -108,23 +170,49 @@ export function useCanvasDrawing(
   );
 
   const strokesRef = useRef(state.strokes);
+  const imageRef = useRef(state.image);
   const gestureRef = useRef<Gesture | null>(null);
   const frameRef = useRef(0);
   /** Circle showing the eraser size while tracing to erase */
   const eraserCursorRef = useRef<HTMLDivElement>(null);
-  // Keep the view in a ref during a pinch so React does not re-render, and commit it to state when the pinch ends
+  /** The image being moved (not put into state until release) */
+  const imageGestureRef = useRef<ImageGesture | null>(null);
+  const imagePinchRef = useRef<ImagePinch | null>(null);
+  /** Div showing the image frame in move mode (requestRender rewrites its position and size directly) */
+  const imageFrameRef = useRef<HTMLDivElement>(null);
+  const imageMoveRef = useRef(imageMove);
+  // So React does not re-render during a pinch, the view is held in a ref and put into state when the pinch ends
   const viewRef = useRef(INITIAL_VIEW);
   const [view, setView] = useState(INITIAL_VIEW);
   const pinchRef = useRef(new PinchTracker());
-  const showGridRef = useRef(showGrid);
-  /** Size of the canvas (paper). Same as the canvas element's size (what is visible at 100%) */
+  /** Size of the canvas (paper). Same as the size of the canvas element (what is visible at 100%) */
   const [page, setPage] = useState({ width: 0, height: 0 });
   // Used by pinch handling (reads the latest size from functions recreated on every pointer event)
   const pageRef = useRef(page);
 
-  // Draw directly with requestAnimationFrame so React does not re-render on every pen movement
+  /** Shows the image frame with a dashed line in move mode (moved in the same coordinate system as the canvas) */
+  const updateImageFrame = useCallback((placement: ImagePlacement | null) => {
+    const frame = imageFrameRef.current;
+    if (!frame) {
+      return;
+    }
+    const view = viewRef.current;
+    if (!placement || !imageMoveRef.current) {
+      frame.hidden = true;
+      return;
+    }
+    const topLeft = toScreenPoint(view, placement);
+    frame.hidden = false;
+    frame.style.width = `${placement.width * view.scale}px`;
+    frame.style.height = `${placement.height * view.scale}px`;
+    frame.style.transform = `translate(${topLeft.x}px, ${topLeft.y}px)`;
+  }, []);
+
+  // So React does not re-render on every pen move, drawing is done directly with requestAnimationFrame
   const requestRender = useCallback(() => {
-    if (!renderer || frameRef.current) return;
+    if (!renderer || frameRef.current) {
+      return;
+    }
     frameRef.current = requestAnimationFrame(() => {
       frameRef.current = 0;
       const gesture = gestureRef.current;
@@ -133,30 +221,73 @@ export function useCanvasDrawing(
           ? visibleStrokes(strokesRef.current, gesture.pieces)
           : strokesRef.current;
       const active = gesture?.tool === 'pen' ? gesture : undefined;
+      const placement =
+        imagePinchRef.current?.working ??
+        imageGestureRef.current?.working ??
+        imageRef.current;
+      const bitmap = placement ? images.bitmap(placement.id) : undefined;
       renderer.draw(
         buildSceneVertices(strokes, active),
         viewRef.current,
-        showGridRef.current,
+        placement && bitmap ? { bitmap, ...placement } : undefined,
       );
+      updateImageFrame(placement);
     });
-  }, [renderer]);
+  }, [renderer, images, updateImageFrame]);
 
   useEffect(() => () => cancelAnimationFrame(frameRef.current), []);
 
   useEffect(() => {
     strokesRef.current = state.strokes;
+    imageRef.current = state.image;
     requestRender();
-  }, [state.strokes, requestRender]);
+  }, [state.strokes, state.image, requestRender]);
+
+  // Keep only images that may be shown (the one placed now and those undo/
+  // redo can bring back). Clearing empties the history, so all images are discarded
+  useEffect(() => {
+    const alive = new Set<string>();
+    if (state.image) {
+      alive.add(state.image.id);
+    }
+    for (const stack of [state.undoStack, state.redoStack]) {
+      for (const op of stack) {
+        if (op.type !== 'image') {
+          continue;
+        }
+        if (op.before) {
+          alive.add(op.before.id);
+        }
+        if (op.after) {
+          alive.add(op.after.id);
+        }
+      }
+    }
+    images.retain(alive);
+  }, [state.image, state.undoStack, state.redoStack, images]);
 
   useEffect(() => {
-    showGridRef.current = showGrid;
+    imageMoveRef.current = imageMove;
     requestRender();
-  }, [showGrid, requestRender]);
+  }, [imageMove, requestRender]);
+
+  // Redraw when decoding of an image finishes. Unless CanvasPage also re-renders, the slider that
+  // reads the original size stays at its pre-decoding state, so update state too
+  const [, setDecoded] = useState(0);
+  useEffect(() => {
+    images.setOnChange(() => {
+      setDecoded((count) => count + 1);
+      requestRender();
+    });
+    return () => images.setOnChange(() => {});
+  }, [images, requestRender]);
 
   // Measure the size even without a renderer (WebGPU unavailable), to report the visible area to the PC
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    if (!canvas) {
+      return;
+    }
     const observer = new ResizeObserver(() =>
       setPage({ width: canvas.clientWidth, height: canvas.clientHeight }),
     );
@@ -204,11 +335,15 @@ export function useCanvasDrawing(
       const pieces = (gesture.pieces.get(stroke.id) ?? [stroke]).flatMap(
         (piece) => {
           const rest = eraseAlong(piece, from, point, gesture.radius);
-          if (rest) erased = true;
+          if (rest) {
+            erased = true;
+          }
           return rest ?? [piece];
         },
       );
-      if (erased) gesture.pieces.set(stroke.id, pieces);
+      if (erased) {
+        gesture.pieces.set(stroke.id, pieces);
+      }
     }
   };
 
@@ -225,7 +360,9 @@ export function useCanvasDrawing(
     event: ReactPointerEvent<HTMLCanvasElement> | null,
   ) => {
     const cursor = eraserCursorRef.current;
-    if (!cursor) return;
+    if (!cursor) {
+      return;
+    }
     const erasing = gestureRef.current !== null && eraserMode === 'partial';
     const visible =
       event !== null &&
@@ -246,7 +383,9 @@ export function useCanvasDrawing(
 
   // When the tool or erase mode changes, hide the old circle (it reappears on the next pointer move)
   useEffect(() => {
-    if (eraserCursorRef.current) eraserCursorRef.current.hidden = true;
+    if (eraserCursorRef.current) {
+      eraserCursorRef.current.hidden = true;
+    }
   }, [tool, eraserMode]);
 
   /** Discards the line being drawn or the erase in progress */
@@ -256,9 +395,68 @@ export function useCanvasDrawing(
     requestRender();
   };
 
+  /** Commits an image being moved, if any (finishing a move or handing over to a pinch) */
+  const commitImageGesture = () => {
+    const gesture = imageGestureRef.current;
+    imageGestureRef.current = null;
+    if (gesture) {
+      dispatch({ type: 'image', image: gesture.working });
+    }
+  };
+
+  const spread = ([a, b]: FingerPair) => Math.hypot(b.x - a.x, b.y - a.y);
+
+  /** Pinch in move mode: zooms the image by the finger distance ratio, keeping its center */
+  const moveImagePinch = (before: FingerPair, after: FingerPair) => {
+    const pinch = imagePinchRef.current;
+    if (!pinch) {
+      return;
+    }
+    if (pinch.startSpread === 0) {
+      pinch.startSpread = spread(before);
+    }
+    const factor =
+      pinch.startSpread > 0 ? spread(after) / pinch.startSpread : 1;
+    const start = pinch.start;
+    // Limits are set as a ratio to the original size (pixels)
+    const natural = images.natural(start.id)?.width;
+    const width = Math.min(
+      (natural ?? start.width * 2) * IMAGE_SCALE_RANGE.max,
+      Math.max(
+        (natural ?? start.width) * IMAGE_SCALE_RANGE.min,
+        start.width * factor,
+      ),
+    );
+    const height = start.height * (width / start.width);
+    const center = {
+      x: start.x + start.width / 2,
+      y: start.y + start.height / 2,
+    };
+    pinch.working = clampPlacement(
+      {
+        ...start,
+        width,
+        height,
+        x: center.x - width / 2,
+        y: center.y - height / 2,
+      },
+      pageRef.current,
+    );
+    requestRender();
+  };
+
+  const commitImagePinch = () => {
+    const pinch = imagePinchRef.current;
+    imagePinchRef.current = null;
+    if (pinch) {
+      dispatch({ type: 'image', image: pinch.working });
+    }
+  };
+
   /**
-   * Tracks fingers (touch). With two fingers, zooms and pans by pinching and returns true (not used for drawing).
-   * If a second finger touches while drawing with one, the stroke in progress is canceled and it becomes a pinch
+   * Tracks fingers (touch). With two fingers it zooms and pans with a pinch and returns true (not used for writing).
+   * If a second finger touches while writing with one, the stroke in progress is canceled and it becomes a pinch.
+   * In move mode the pinch zooms the image instead of the canvas
    */
   const handleTouch = (
     event: ReactPointerEvent<HTMLCanvasElement>,
@@ -270,30 +468,111 @@ export function useCanvasDrawing(
       case 'pointerdown':
         canvas.setPointerCapture(event.pointerId);
         pinch.down(event.pointerId, screen);
-        if (pinch.count < 2) return false;
-        if (gestureRef.current?.pointerType === 'touch') cancelGesture();
+        if (pinch.count < 2) {
+          return false;
+        }
+        if (gestureRef.current?.pointerType === 'touch') {
+          cancelGesture();
+        }
+        // If the image was being moved, commit it there before starting the pinch
+        const base = imageGestureRef.current?.working ?? imageRef.current;
+        commitImageGesture();
+        imageEvents.onGestureStart();
+        if (imageMoveRef.current && base) {
+          imagePinchRef.current = {
+            startSpread: 0,
+            start: { ...base },
+            working: { ...base },
+          };
+        }
         return true;
       case 'pointermove': {
         const moved = pinch.move(event.pointerId, screen);
-        if (!moved) return false;
+        if (!moved) {
+          return imagePinchRef.current !== null;
+        }
+        if (imagePinchRef.current) {
+          moveImagePinch(moved.before, moved.after);
+          return true;
+        }
         const next = pinchView(viewRef.current, moved.before, moved.after);
         viewRef.current = clampView(next, pageRef.current);
         requestRender();
         return true;
       }
-      default:
-        if (pinch.up(event.pointerId)) commitView(viewRef.current);
+      default: {
+        const ended = pinch.up(event.pointerId);
+        if (imagePinchRef.current) {
+          if (ended) {
+            commitImagePinch();
+          }
+          return false;
+        }
+        if (ended) {
+          commitView(viewRef.current);
+        }
         return false;
+      }
     }
   };
 
-  const onPointerDown = (event: ReactPointerEvent<HTMLCanvasElement>) => {
-    if (event.pointerType === 'pen') onPenDetected();
-    // Fingers do not draw when used for a pinch or when finger drawing is off
-    if (event.pointerType === 'touch' && (handleTouch(event) || !fingerDrawing))
+  /** Starts moving the image with one pointer (finger, mouse or pen) in move mode */
+  const startImageMove = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    const placement = imageRef.current;
+    if (!placement) {
       return;
-    // Another pointer (a palm, etc.) touching while drawing does not start a new stroke
-    if (gestureRef.current || !renderer) return;
+    }
+    const canvas = event.currentTarget;
+    canvas.setPointerCapture(event.pointerId);
+    const downScreen = toScreen(
+      event.nativeEvent,
+      canvas.getBoundingClientRect(),
+    );
+    const origin = toCanvasPoint(viewRef.current, downScreen);
+    imageGestureRef.current = {
+      pointerId: event.pointerId,
+      origin,
+      downScreen,
+      onImage:
+        origin.x >= placement.x &&
+        origin.x <= placement.x + placement.width &&
+        origin.y >= placement.y &&
+        origin.y <= placement.y + placement.height,
+      dragging: false,
+      start: { ...placement },
+      working: { ...placement },
+    };
+  };
+
+  const onPointerDown = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    if (event.pointerType === 'pen') {
+      onPenDetected();
+    }
+    // Handle the pinch check first for fingers (placed before the writing check so that even with
+    // "Draw with Finger" OFF, one finger can move the image in move mode)
+    if (event.pointerType === 'touch' && handleTouch(event)) {
+      return;
+    }
+    // While something is moving, do not start a new one with another pointer
+    if (
+      gestureRef.current ||
+      imageGestureRef.current ||
+      imagePinchRef.current
+    ) {
+      return;
+    }
+    // In move mode, one finger (including mouse and pen) moves the image
+    if (imageMoveRef.current && imageRef.current) {
+      startImageMove(event);
+      return;
+    }
+    // When finger drawing is off, do not start writing with a finger
+    if (event.pointerType === 'touch' && !fingerDrawing) {
+      return;
+    }
+    if (!renderer) {
+      return;
+    }
 
     const canvas = event.currentTarget;
     canvas.setPointerCapture(event.pointerId);
@@ -321,10 +600,46 @@ export function useCanvasDrawing(
   };
 
   const onPointerMove = (event: ReactPointerEvent<HTMLCanvasElement>) => {
-    if (event.pointerType === 'touch' && handleTouch(event)) return;
+    if (event.pointerType === 'touch' && handleTouch(event)) {
+      return;
+    }
+    const imageGesture = imageGestureRef.current;
+    if (imageGesture) {
+      if (imageGesture.pointerId !== event.pointerId) {
+        return;
+      }
+      const screen = toScreen(
+        event.nativeEvent,
+        event.currentTarget.getBoundingClientRect(),
+      );
+      if (!imageGesture.dragging) {
+        const { downScreen } = imageGesture;
+        if (
+          Math.hypot(screen.x - downScreen.x, screen.y - downScreen.y) <=
+          CLICK_SLOP
+        ) {
+          return;
+        }
+        imageGesture.dragging = true;
+        imageEvents.onGestureStart();
+      }
+      const point = toCanvasPoint(viewRef.current, screen);
+      imageGesture.working = clampPlacement(
+        {
+          ...imageGesture.start,
+          x: imageGesture.start.x + (point.x - imageGesture.origin.x),
+          y: imageGesture.start.y + (point.y - imageGesture.origin.y),
+        },
+        pageRef.current,
+      );
+      requestRender();
+      return;
+    }
     const gesture = gestureRef.current;
     // Ignore other pointers moving while drawing
-    if (gesture && gesture.pointerId !== event.pointerId) return;
+    if (gesture && gesture.pointerId !== event.pointerId) {
+      return;
+    }
 
     if (gesture) {
       for (const e of coalescedEvents(event.nativeEvent)) {
@@ -340,9 +655,32 @@ export function useCanvasDrawing(
   };
 
   const onPointerUp = (event: ReactPointerEvent<HTMLCanvasElement>) => {
-    if (event.pointerType === 'touch') handleTouch(event);
+    if (event.pointerType === 'touch') {
+      handleTouch(event);
+    }
+    const imageGesture = imageGestureRef.current;
+    if (imageGesture) {
+      if (imageGesture.pointerId !== event.pointerId) {
+        return;
+      }
+      if (imageGesture.dragging) {
+        commitImageGesture();
+        requestRender();
+      } else {
+        // Released without moving: a click
+        imageGestureRef.current = null;
+        if (imageGesture.onImage) {
+          imageEvents.onClick({ x: event.clientX, y: event.clientY });
+        } else {
+          imageEvents.onClickOutside();
+        }
+      }
+      return;
+    }
     const gesture = gestureRef.current;
-    if (gesture?.pointerId !== event.pointerId) return;
+    if (gesture?.pointerId !== event.pointerId) {
+      return;
+    }
 
     gestureRef.current = null;
     updateEraserCursor(event);
@@ -362,8 +700,17 @@ export function useCanvasDrawing(
 
   // When the OS or browser takes over the gesture, discard it
   const onPointerCancel = (event: ReactPointerEvent<HTMLCanvasElement>) => {
-    if (event.pointerType === 'touch') handleTouch(event);
-    if (gestureRef.current?.pointerId !== event.pointerId) return;
+    if (event.pointerType === 'touch') {
+      handleTouch(event);
+    }
+    if (imageGestureRef.current?.pointerId === event.pointerId) {
+      imageGestureRef.current = null;
+      requestRender();
+      return;
+    }
+    if (gestureRef.current?.pointerId !== event.pointerId) {
+      return;
+    }
     cancelGesture();
   };
 
@@ -392,19 +739,30 @@ export function useCanvasDrawing(
     /** The committed view (excluding movement during a pinch) */
     view,
     resetView: () => commitView(INITIAL_VIEW),
-    /** Whether there is at least one stroke (whether it can be cleared) */
-    canClear: state.strokes.length > 0,
-    /** Returns to a blank initial state: removes every stroke (also sent to the PC), empties the history, and resets the view to 100% */
+    /** Whether there is at least one stroke or a placed image (whether it can be cleared) */
+    canClear: state.strokes.length > 0 || state.image !== null,
+    /** Returns to a clean initial state: erases all strokes and the image (also sent to the PC), empties the history and resets the view to 100% */
     clear: () => {
       dispatch({ type: 'clear' });
       commitView(INITIAL_VIEW);
     },
     viewport,
     page,
-    /** Changes this canvas page made in the last action (sent to the PC) */
+    /** The image laid under the strokes (one at most for now) */
+    image: state.image,
+    /** Adds, moves, resizes or deletes the image (null to delete). Goes into the undo history and is sent to the PC */
+    setImage: (image: ImagePlacement | null) =>
+      dispatch({ type: 'image', image }),
+    /** Moves only the display first (while the slider is moving). Committed with setImage on release */
+    previewImage: (image: ImagePlacement | null) => {
+      imageRef.current = image;
+      requestRender();
+    },
+    /** Changes this page made in the last operation (sent to the PC) */
     outgoing: state.outgoing,
     applyRemote,
     eraserCursorRef,
+    imageFrameRef,
     pointerHandlers: {
       onPointerDown,
       onPointerMove,

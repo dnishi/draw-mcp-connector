@@ -41,6 +41,18 @@ pub struct Stroke {
     pub points: Vec<StrokePoint>,
 }
 
+/// Position and size of an image (canvas coordinates, CSS pixels). Images are placed under all strokes.
+/// Only one per canvas for now (referenced by ID, anticipating several in the future)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ImagePlacement {
+    /// ID unique across the canvas. Shared with the bytes, which are sent on a separate stream (ImageStream)
+    pub id: String,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
 /// A change to the canvas. Used both page → bridge and bridge → page
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -51,6 +63,22 @@ pub enum CanvasOp {
     Remove { ids: Vec<String> },
     /// Replaces the stroke with the same ID, keeping its stacking order
     Replace { stroke: Stroke },
+    /// Places an image (also used to replace it with a new position or size). Replaces any existing image.
+    /// The bytes are sent on a separate stream (ImageStream)
+    SetImage { image: ImagePlacement },
+    /// Removes the image. Ignored if there is no image
+    RemoveImage,
+}
+
+/// Header on the first line of a separate stream that carries image bytes (opened one-to-one, apart from the bidirectional stream).
+/// provide is followed by the PNG bytes; request has nothing after it. Either the page or the bridge can open one
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum ImageStream {
+    /// Sends the bytes of the image with the given ID
+    Provide { id: String },
+    /// The bytes of the image with the given ID are requested. Not sent if it does not have them
+    Request { id: String },
 }
 
 /// Area currently visible on the canvas page (canvas coordinates, CSS pixels). Changes with zoom and pan
@@ -115,10 +143,15 @@ pub enum ServerMessage {
     },
     /// Another connection reconnected with the key handed to this connection. The connection is closed after this
     Superseded,
-    /// Approved. The whole canvas held by the bridge. The page adopts it,
-    /// keeps strokes only it has (such as ones written before the bridge restarted), and sends them back with insert
+    /// Approved. The whole canvas the bridge has. The page matches it,
+    /// keeps strokes only it has (such as ones written before the bridge restarted), and sends them back with insert.
+    /// The bridge's image wins, but an image the page has and the bridge does not is sent back with setImage.
+    /// If the page does not have the bytes of the bridge's image, it receives them with an ImageStream request
     Snapshot {
         strokes: Vec<Stroke>,
+        /// The placed image. None if there is none
+        #[serde(default)]
+        image: Option<ImagePlacement>,
     },
     Op {
         op: CanvasOp,
@@ -139,6 +172,8 @@ mod tests {
         typescript::generate(&[
             schemars::schema_for!(ClientMessage),
             schemars::schema_for!(ServerMessage),
+            // Not referenced from the message types, but the page uses it for the stream header
+            schemars::schema_for!(ImageStream),
         ])
     }
 
@@ -168,6 +203,51 @@ mod tests {
         };
         assert_eq!((viewport.x, viewport.y), (0.0, 0.0));
         assert_eq!(page, None);
+    }
+
+    #[test]
+    fn image_ops_use_camel_case_and_snapshot_image_is_optional() {
+        let message = ServerMessage::Op {
+            op: CanvasOp::SetImage {
+                image: ImagePlacement {
+                    id: "img".into(),
+                    x: 1.0,
+                    y: 2.0,
+                    width: 3.0,
+                    height: 4.0,
+                },
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(&message).unwrap(),
+            serde_json::json!({
+                "type": "op",
+                "op": {
+                    "type": "setImage",
+                    "image": { "id": "img", "x": 1.0, "y": 2.0, "width": 3.0, "height": 4.0 }
+                }
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(CanvasOp::RemoveImage).unwrap(),
+            serde_json::json!({ "type": "removeImage" })
+        );
+
+        // Snapshots from pages before images were introduced still parse
+        let snapshot: ServerMessage = serde_json::from_value(serde_json::json!({
+            "type": "snapshot",
+            "strokes": []
+        }))
+        .unwrap();
+        let ServerMessage::Snapshot { image, .. } = snapshot else {
+            panic!("snapshot のはず");
+        };
+        assert_eq!(image, None);
+
+        assert_eq!(
+            serde_json::to_value(ImageStream::Request { id: "img".into() }).unwrap(),
+            serde_json::json!({ "type": "request", "id": "img" })
+        );
     }
 
     #[test]

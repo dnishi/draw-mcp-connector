@@ -1,6 +1,7 @@
 import {
   Eraser,
-  Grid3x3,
+  ImagePlus,
+  Move,
   Palette,
   Pen,
   Pointer,
@@ -17,6 +18,7 @@ import {
   useRef,
   useState,
   type ReactNode,
+  type Ref,
 } from 'react';
 import { Button, buttonVariants } from '@/components/ui/button';
 import { Separator } from '@/components/ui/separator';
@@ -86,7 +88,9 @@ function ChoiceGroup<T extends string>({
       // Pressing the selected button again gives an empty array; keep the selection in that case
       onValueChange={([next]) => {
         const selected = choices.find((choice) => choice.value === next);
-        if (selected) onChange(selected.value);
+        if (selected) {
+          onChange(selected.value);
+        }
       }}
     >
       {choices.map((choice) => (
@@ -140,7 +144,9 @@ function EraserSettings({
         value={eraserMode}
         onChange={onEraserModeChange}
         onPress={(mode) => {
-          if (mode === 'stroke') onDone();
+          if (mode === 'stroke') {
+            onDone();
+          }
         }}
       />
       <Separator orientation="vertical" className="mx-1 my-1.5" />
@@ -272,7 +278,7 @@ function ClearButton({
       </AlertDialog.Trigger>
       <AlertDialogPopup
         title="Clear the canvas?"
-        description="All strokes will be erased. You can't undo this action."
+        description="All strokes and the image will be erased. You can't undo this action."
       >
         <AlertDialog.Close render={<Button variant="outline" />}>
           Cancel
@@ -292,9 +298,6 @@ type ToolbarProps = EraserSettingsProps &
     /** Whether one finger draws (erases) */
     fingerDrawing: boolean;
     onFingerDrawingChange: (enabled: boolean) => void;
-    /** Whether to show the grid */
-    showGrid: boolean;
-    onShowGridChange: (show: boolean) => void;
     history: History;
     /** Zoom factor (1 is 100%). null when not zoomed or panned, in which case the zoom button is hidden */
     viewScale: number | null;
@@ -304,6 +307,15 @@ type ToolbarProps = EraserSettingsProps &
     canClear: boolean;
     /** Returns to a blank initial state */
     onClear: () => void;
+    /** Imports an image (opens the file picker) */
+    onImport: () => void;
+    /** Whether the image is in move mode. When ON, swipe moves it and pinch zooms it */
+    imageMove: boolean;
+    onImageMoveChange: (enabled: boolean) => void;
+    /** The "Move Image" button (anchor for showing the image size and delete popover next to this button) */
+    moveImageButtonRef?: Ref<HTMLButtonElement>;
+    /** Whether an image is placed (move mode is unavailable without one) */
+    canMoveImage: boolean;
   };
 
 /** Line separating groups of vertically stacked buttons */
@@ -320,8 +332,6 @@ export function Toolbar({
   onToolChange,
   fingerDrawing,
   onFingerDrawingChange,
-  showGrid,
-  onShowGridChange,
   history,
   viewScale,
   onResetView,
@@ -331,6 +341,11 @@ export function Toolbar({
   onPenColorChange,
   customColor,
   onCustomColorChange,
+  onImport,
+  imageMove,
+  onImageMoveChange,
+  moveImageButtonRef,
+  canMoveImage,
   ...eraserSettings
 }: ToolbarProps) {
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -357,7 +372,9 @@ export function Toolbar({
     // Presses on tool buttons are toggled by onToolPress, so do not treat them as outside presses
     const onTools =
       event.target instanceof Node && toolsRef.current?.contains(event.target);
-    if (!open && reason === 'outside-press' && onTools) return;
+    if (!open && reason === 'outside-press' && onTools) {
+      return;
+    }
     setSettingsOpen(open);
   };
 
@@ -418,13 +435,28 @@ export function Toolbar({
       >
         <Pointer />
       </Toggle>
-      <Toggle
-        size="lg"
-        aria-label="Show Grid"
-        pressed={showGrid}
-        onPressedChange={(pressed) => onShowGridChange(pressed)}
+
+      <GroupSeparator />
+
+      <Button
+        variant="ghost"
+        size="icon-lg"
+        aria-label="Import Image"
+        onClick={onImport}
       >
-        <Grid3x3 />
+        <ImagePlus />
+      </Button>
+      {/* While ON, swiping moves the image and a two-finger pinch zooms the image (not the canvas).
+          When turned ON and when the image is clicked, shows the size and delete popover (ImageSettingsPopover) */}
+      <Toggle
+        ref={moveImageButtonRef}
+        size="lg"
+        aria-label="Move Image"
+        pressed={imageMove}
+        disabled={!canMoveImage}
+        onPressedChange={onImageMoveChange}
+      >
+        <Move />
       </Toggle>
 
       <GroupSeparator />

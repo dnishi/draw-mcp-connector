@@ -13,8 +13,8 @@ export interface ToolSettings {
   eraserSize: number;
   /** Whether one finger draws (erases). Two fingers always pinch */
   fingerDrawing: boolean;
-  /** Whether to show the grid under the strokes (display only; not included in the image given to the AI) */
-  showGrid: boolean;
+  /** Whether the image is in move mode. When ON, a one-finger swipe moves the image and a two-finger pinch zooms the image */
+  imageMove: boolean;
 }
 
 export type ConnectionStatus =

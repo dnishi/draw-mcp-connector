@@ -42,7 +42,9 @@ function pushDisc(mesh: MeshWriter, { x, y, pressure }: StrokePoint): void {
 /** Connects two points with a quad (two triangles) whose width follows each point's pressure */
 function pushSegment(mesh: MeshWriter, a: StrokePoint, b: StrokePoint): void {
   const length = Math.hypot(b.x - a.x, b.y - a.y);
-  if (length === 0) return;
+  if (length === 0) {
+    return;
+  }
 
   const nx = -(b.y - a.y) / length;
   const ny = (b.x - a.x) / length;
@@ -52,7 +54,9 @@ function pushSegment(mesh: MeshWriter, a: StrokePoint, b: StrokePoint): void {
   const a2 = [a.x - nx * ra, a.y - ny * ra] as const;
   const b1 = [b.x + nx * rb, b.y + ny * rb] as const;
   const b2 = [b.x - nx * rb, b.y - ny * rb] as const;
-  for (const [x, y] of [a1, a2, b1, b2, b1, a2]) pushVertex(mesh, x, y);
+  for (const [x, y] of [a1, a2, b1, b2, b1, a2]) {
+    pushVertex(mesh, x, y);
+  }
 }
 
 /**
@@ -67,7 +71,9 @@ export function tessellateStroke(
   const mesh: MeshWriter = { out: [], rgb: toRgb(color) };
   smoothed.forEach((point, i) => {
     pushDisc(mesh, point);
-    if (i > 0) pushSegment(mesh, smoothed[i - 1], point);
+    if (i > 0) {
+      pushSegment(mesh, smoothed[i - 1], point);
+    }
   });
   return new Float32Array(mesh.out);
 }

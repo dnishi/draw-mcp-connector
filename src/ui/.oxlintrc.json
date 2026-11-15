@@ -3,7 +3,9 @@
   "plugins": ["react", "typescript", "oxc"],
   "rules": {
     "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
+    "react/only-export-components": ["warn", { "allowConstantExport": true }],
+    // if・for・while・do・else の本体は、1文でも必ず {} で囲む(中かっこを省いた1行の書き方を禁止する)
+    "curly": ["error", "all"]
   },
   "overrides": [
     {

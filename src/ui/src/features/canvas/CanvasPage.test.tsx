@@ -1,6 +1,12 @@
-import { fireEvent, render, screen, within } from '@testing-library/react';
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CanvasPage } from './CanvasPage';
 
 describe('CanvasPage', () => {
@@ -46,14 +52,151 @@ describe('CanvasPage', () => {
     expect(toggle).toHaveAttribute('aria-pressed', 'false');
   });
 
-  it('グリッドは初めは表示せず、ツールバーで切り替えられる', async () => {
+  it('グリッドの表示を切り替えるボタンは無い', () => {
     render(<CanvasPage />);
-    const toggle = screen.getByRole('button', { name: 'Show Grid' });
-    expect(toggle).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.queryByRole('button', { name: 'Show Grid' })).toBeNull();
+  });
 
-    await userEvent.click(toggle);
+  describe('画像の取り込み', () => {
+    // jsdom has no createImageBitmap or canvas 2D, so fake them as tools that work
+    // up to re-encoding into PNG (still no WebGPU, so drawing cannot be tested)
+    beforeEach(() => {
+      vi.stubGlobal(
+        'createImageBitmap',
+        vi.fn(async () => ({ width: 400, height: 200, close: vi.fn() })),
+      );
+      vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({
+        drawImage: vi.fn(),
+      } as unknown as CanvasRenderingContext2D);
+      vi.spyOn(HTMLCanvasElement.prototype, 'toBlob').mockImplementation(
+        (callback) =>
+          callback(new Blob([new Uint8Array([1])], { type: 'image/png' })),
+      );
+    });
+    afterEach(() => {
+      vi.unstubAllGlobals();
+      vi.restoreAllMocks();
+    });
 
-    expect(toggle).toHaveAttribute('aria-pressed', 'true');
+    const pickFile = async () => {
+      const input = document.querySelector(
+        'input[type=file]',
+      ) as HTMLInputElement;
+      fireEvent.change(input, {
+        target: {
+          files: [
+            new File([new Uint8Array([1, 2, 3])], 'a.png', {
+              type: 'image/png',
+            }),
+          ],
+        },
+      });
+    };
+
+    it('ファイルを選ぶと画像が置いてあり、移動モードが使えるようになる', async () => {
+      render(<CanvasPage />);
+      expect(screen.getByRole('button', { name: 'Move Image' })).toBeDisabled();
+
+      await pickFile();
+
+      // Once a placement is in, Move can be pressed, and Clear works even without lines
+      await waitFor(() =>
+        expect(
+          screen.getByRole('button', { name: 'Move Image' }),
+        ).toBeEnabled(),
+      );
+      expect(screen.getByRole('button', { name: 'Clear' })).toBeEnabled();
+    });
+
+    describe('画像の大きさと削除の吹き出し', () => {
+      // Without a paper size the image is placed as 0×0 and clicks never hit it, so
+      // fake the canvas size (800×600) and the notice of its change
+      beforeEach(() => {
+        vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(
+          800,
+        );
+        vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(
+          600,
+        );
+        vi.stubGlobal(
+          'ResizeObserver',
+          class {
+            #callback: (entries: unknown[]) => void;
+            constructor(callback: (entries: unknown[]) => void) {
+              this.#callback = callback;
+            }
+            observe() {
+              this.#callback([]);
+            }
+            unobserve() {}
+            disconnect() {}
+          },
+        );
+        HTMLCanvasElement.prototype.setPointerCapture = vi.fn();
+      });
+
+      const moveButton = () =>
+        screen.getByRole('button', { name: 'Move Image' });
+      const popup = () =>
+        screen.queryByRole('dialog', { name: 'Image Settings' });
+      /** Presses and releases the mouse at (x, y) on the canvas without moving it */
+      const clickCanvas = async (x: number, y: number) => {
+        await userEvent.pointer({
+          keys: '[MouseLeft]',
+          target: screen.getByLabelText('Canvas'),
+          coords: { clientX: x, clientY: y },
+        });
+      };
+      const placeImage = async () => {
+        render(<CanvasPage />);
+        await pickFile();
+        await waitFor(() => expect(moveButton()).toBeEnabled());
+      };
+
+      it('「Move Image」で移動モードにすると出し、OFF にすると閉じる', async () => {
+        await placeImage();
+
+        await userEvent.click(moveButton());
+        expect(
+          await screen.findByRole('dialog', { name: 'Image Settings' }),
+        ).toBeInTheDocument();
+
+        await userEvent.click(moveButton());
+        await waitFor(() => expect(popup()).not.toBeInTheDocument());
+      });
+
+      it('画像をクリックすると出し、もう一度クリックしても閉じず、画像の外のクリックで閉じる', async () => {
+        await placeImage();
+        await userEvent.click(moveButton());
+        // Close the popover opened by the button, then check that clicking the image opens it
+        await clickCanvas(5, 5);
+        await waitFor(() => expect(popup()).not.toBeInTheDocument());
+
+        // A 400×200 image is placed in the middle of the 800×600 paper (200 to 600, 200 to 400)
+        await clickCanvas(400, 300);
+        expect(
+          await screen.findByRole('dialog', { name: 'Image Settings' }),
+        ).toBeInTheDocument();
+
+        await clickCanvas(420, 310);
+        expect(popup()).toBeInTheDocument();
+
+        await clickCanvas(5, 5);
+        await waitFor(() => expect(popup()).not.toBeInTheDocument());
+      });
+    });
+
+    // In jsdom the WebGPU error is shown first (notice prefers error), so
+    // only check that the image is not placed
+    it('読み込めない画像は、画像を置かない', async () => {
+      vi.mocked(createImageBitmap).mockRejectedValue(new Error('bad image'));
+      render(<CanvasPage />);
+
+      await pickFile();
+      await waitFor(() => expect(createImageBitmap).toHaveBeenCalled());
+
+      expect(screen.getByRole('button', { name: 'Move Image' })).toBeDisabled();
+    });
   });
 
   describe('PC のマウスのポインタ', () => {

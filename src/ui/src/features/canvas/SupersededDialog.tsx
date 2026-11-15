@@ -16,7 +16,9 @@ export function SupersededDialog({ open, onClose }: SupersededDialogProps) {
     <AlertDialog.Root
       open={open}
       onOpenChange={(next) => {
-        if (!next) onClose();
+        if (!next) {
+          onClose();
+        }
       }}
     >
       <AlertDialogPopup

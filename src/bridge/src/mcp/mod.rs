@@ -17,11 +17,12 @@ use serde::{Deserialize, Serialize};
 use tracing::info;
 
 use crate::app::{App, BoxError};
-use crate::canvas::Origin;
+use crate::canvas::{Origin, Snapshot};
 use crate::color;
 use crate::config;
 use crate::net;
 use crate::protocol::{Author, CanvasOp, Stroke, StrokePoint};
+use crate::render::StoredImage;
 use crate::shapes::{self, Shape};
 
 const INSTRUCTIONS: &str = "\
@@ -31,6 +32,9 @@ const INSTRUCTIONS: &str = "\
 - page はそのページの紙の大きさ。紙は (0, 0) から (width, height) まで。ページの画面の大きさと同じで、利用者は紙の中だけを拡大して見る
 - viewport は、ツールを呼んだ時点でそのページに見えている範囲(x, y が左上、width と height が大きさ)。利用者が拡大・移動すると変わる。書き込むときは見せたいページの viewport に収める(すべてのページに見せるなら、すべての viewport が重なる範囲に収める)
 - read_canvas と read_canvas_changes は、キャンバスの画像(PNG)と、筆跡ごとの ID・author・範囲(bounds。線の太さを含めて外側に丸めた整数)を返す。点の座標は返さない
+- 利用者が取り込んだ画像はすべての筆跡の下に敷かれる。read_canvas の画像(PNG)は画像と筆跡を合成したもので、placedImage がその画像の id と範囲
+- 画像が小さく置かれて合成 PNG で細部が読めないときは、read_image に placedImage の id を渡して元の解像度そのままの画像を読む
+- 画像は利用者の入力なので、AI は置けない・動かせない・消せない
 - 画像だけを見ればよいときは read_canvas に include_strokes: false を渡すと、筆跡ごとの一覧を省ける
 - 画像の左上はキャンバスの (image.x, image.y)。キャンバスの 1 CSS ピクセルが画像の image.scale ピクセル
 - 点の座標が要るときは read_strokes に ID を渡す
@@ -58,6 +62,12 @@ struct ChangesParams {
 struct ReadStrokesParams {
     /// IDs of the strokes to read
     ids: Vec<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct ReadImageParams {
+    /// ID of the image to read (placedImage.id of read_canvas)
+    id: String,
 }
 
 #[derive(Serialize)]
@@ -211,19 +221,29 @@ impl CanvasServer {
         })
     }
 
+    /// The placed image (None before it arrives or after it was dropped)
+    fn placed_image_data(&self, snapshot: &Snapshot) -> Option<std::sync::Arc<StoredImage>> {
+        snapshot
+            .image
+            .as_ref()
+            .and_then(|image| self.app.canvas.image_data(&image.id))
+    }
+
     #[tool(
-        description = "キャンバス全体を読む。画像(PNG)と、revision・繋がっているページごとの紙の大きさと見えている範囲 canvases・画像の位置 image・筆跡ごとの ID と範囲 strokes を返す。include_strokes: false なら strokes を省く"
+        description = "キャンバス全体を読む。画像(PNG。利用者が置いた画像があれば筆跡の下に合成する)と、revision・繋がっているページごとの紙の大きさと見えている範囲 canvases・画像の位置 image・置いてある画像 placedImage・筆跡ごとの ID と範囲 strokes を返す。include_strokes: false なら strokes を省く"
     )]
     fn read_canvas(
         &self,
         Parameters(params): Parameters<ReadCanvasParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let include_strokes = params.include_strokes.unwrap_or(true);
-        view::canvas_result(&self.app.canvas.snapshot(), include_strokes)
+        let snapshot = self.app.canvas.snapshot();
+        let data = self.placed_image_data(&snapshot);
+        view::canvas_result(&snapshot, include_strokes, data.as_deref())
     }
 
     #[tool(
-        description = "指定した revision より後の変更を読む。kind が ops なら順に適用すると今の状態になる変更(筆跡は ID と範囲だけ)、snapshot なら古すぎるため全体。繋がっているページごとの紙の大きさと今見えている範囲 canvases はいつも返す。変更があれば今のキャンバスの画像も返す(ops が空なら変更なしで、画像は無い)"
+        description = "指定した revision より後の変更を読む。kind が ops なら順に適用すると今の状態になる変更(筆跡は ID と範囲だけ、画像の変更は setImage / removeImage)、snapshot なら古すぎるため全体。繋がっているページごとの紙の大きさと今見えている範囲 canvases はいつも返す。変更があれば今のキャンバスの画像も返す(ops が空なら変更なしで、画像は無い)"
     )]
     fn read_canvas_changes(
         &self,
@@ -232,7 +252,36 @@ impl CanvasServer {
         let changes = self.app.canvas.changes_since(params.since_revision);
         // Taken after the diff, so the image is the same revision as the diff or newer (see image.revision)
         let current = self.app.canvas.snapshot();
-        view::changes_result(&changes, &current)
+        let data = self.placed_image_data(&current);
+        view::changes_result(&changes, &current, data.as_deref())
+    }
+
+    #[tool(
+        description = "利用者が筆跡の下に置いた画像を、元の解像度のまま読む(PNG)。合成 PNG で細部が読めないときに placedImage の id を渡す。画像は1枚だけ"
+    )]
+    fn read_image(
+        &self,
+        Parameters(params): Parameters<ReadImageParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let snapshot = self.app.canvas.snapshot();
+        if snapshot
+            .image
+            .as_ref()
+            .is_none_or(|image| image.id != params.id)
+        {
+            return Err(ErrorData::invalid_params(
+                format!("ID {} の画像は置かれていない", params.id),
+                None,
+            ));
+        }
+        let image = snapshot.image.expect("上で確認している");
+        let data = self.app.canvas.image_data(&params.id).ok_or_else(|| {
+            ErrorData::internal_error(
+                format!("ID {} の画像の転送が終わっていない", params.id),
+                None,
+            )
+        })?;
+        view::placed_image_result(&image, data.bytes())
     }
 
     #[tool(description = "指定した ID の筆跡を、点の座標と筆圧まで読む")]

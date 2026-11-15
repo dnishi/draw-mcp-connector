@@ -22,7 +22,9 @@ function lerp(a: StrokePoint, b: StrokePoint, t: number): StrokePoint {
 
 /** Rounds corners once with Chaikin's algorithm. The first and last points do not move */
 export function smoothPoints(points: readonly StrokePoint[]): StrokePoint[] {
-  if (points.length < 3) return [...points];
+  if (points.length < 3) {
+    return [...points];
+  }
 
   const smoothed = [points[0]];
   for (let i = 0; i < points.length - 1; i++) {

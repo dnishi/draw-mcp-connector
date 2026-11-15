@@ -6,6 +6,13 @@ import type { ConnectionInfo } from './connectionInfo';
 import type { CanvasOp, PageSize, ServerMessage, Viewport } from './protocol';
 import { readResumeKey, saveResumeKey } from './resumeKey';
 
+/** Store of image bytes (ImageStore in features/canvas) */
+export interface ImageBytes {
+  has(id: string): boolean;
+  get(id: string): Uint8Array | undefined;
+  put(id: string, bytes: Uint8Array): void;
+}
+
 interface Options {
   /** Connection info. null if it is not in the URL (no connection) */
   info: ConnectionInfo | null;
@@ -16,6 +23,11 @@ interface Options {
   /** Changes made by this canvas page (sent to the PC whenever they change) */
   outgoing: readonly CanvasOp[];
   applyRemote: (action: RemoteAction) => void;
+  /**
+   * Image bytes (exchanged on streams separate from the JSON).
+   * Pass an object that is never discarded once created and keeps its identity (a change causes a reconnect)
+   */
+  images: ImageBytes;
 }
 
 const SUPERSEDED_MESSAGE =
@@ -32,6 +44,7 @@ export function useBridgeSync({
   page,
   outgoing,
   applyRemote,
+  images,
 }: Options) {
   // info is fixed when the page opens and never changes afterwards
   const [status, setStatus] = useState<ConnectionStatus>(
@@ -44,14 +57,19 @@ export function useBridgeSync({
   const [attempt, setAttempt] = useState(0);
   // Holds only a connection that is approved and syncing
   const syncingRef = useRef<BridgeConnection | null>(null);
-  // Used to send the area and paper size at connection time in hello. Changes do not cause a reconnect
+  // IDs of images whose contents were sent on the current connection. Contents are sent only once; moves and resizes send only the placement.
+  // Emptied on reconnect (if the bridge restarted, the contents are sent again)
+  const sentImagesRef = useRef(new Set<string>());
+  // To send the range and paper size at connection time with hello. Does not reconnect when they change
   const viewRef = useRef({ viewport, page });
   useEffect(() => {
     viewRef.current = { viewport, page };
   }, [viewport, page]);
 
   useEffect(() => {
-    if (!info) return;
+    if (!info) {
+      return;
+    }
     let cancelled = false;
     let connection: BridgeConnection | null = null;
     // Reason for refusal. Keep showing it even if the connection closes afterwards
@@ -72,13 +90,31 @@ export function useBridgeSync({
           saveResumeKey(received.key);
           return;
         case 'snapshot':
-          applyRemote({ type: 'snapshot', strokes: received.strokes });
+          applyRemote({
+            type: 'snapshot',
+            strokes: received.strokes,
+            image: received.image,
+          });
+          // Even on the same connection, the whole canvas is resent when changes were missed. Keep the sent record then
+          if (syncingRef.current !== connection) {
+            sentImagesRef.current.clear();
+          }
           syncingRef.current = connection;
           setStatus('connected');
           setMessage(null);
+          // If the page does not know the bytes of the bridge's image, receive them on a separate stream
+          if (received.image && !images.has(received.image.id)) {
+            connection?.requestImageBytes(received.image.id);
+          }
           return;
         case 'op':
           applyRemote({ type: 'remote', op: received.op });
+          if (
+            received.op.type === 'setImage' &&
+            !images.has(received.op.image.id)
+          ) {
+            connection?.requestImageBytes(received.op.image.id);
+          }
           return;
         case 'rejected':
           rejectedReason = received.reason;
@@ -94,6 +130,21 @@ export function useBridgeSync({
 
     connectBridge(info, {
       onMessage,
+      // Contents that arrived from the bridge are held by the bridge, so they are not resent even when moved
+      onImageBytes: (id, bytes) => {
+        images.put(id, bytes);
+        sentImagesRef.current.add(id);
+      },
+      // Requested when the bridge does not have the contents (e.g. after the oldest were dropped).
+      // Images that failed to send are also routed here by bridgeClient if they were requested
+      onImageRequest: (id) => {
+        const bytes = images.get(id);
+        if (!bytes) {
+          return;
+        }
+        connection?.sendImageBytes(id, bytes);
+        sentImagesRef.current.add(id);
+      },
       onClose: () =>
         disconnect(
           rejectedReason ??
@@ -124,7 +175,7 @@ export function useBridgeSync({
       syncingRef.current = null;
       connection?.close();
     };
-  }, [info, applyRemote, attempt]);
+  }, [info, applyRemote, attempt, images]);
 
   const canReconnect = info !== null && status === 'disconnected';
   const reconnect = useCallback(() => {
@@ -135,14 +186,31 @@ export function useBridgeSync({
   }, []);
   const dismissSuperseded = useCallback(() => setSuperseded(false), []);
 
+  // For the first setImage of an image, send the bytes on a separate stream first (so that the bridge can draw
+  // the image when the op arrives). For images already sent, moves and resizes send only the placement
   useEffect(() => {
-    for (const op of outgoing) syncingRef.current?.send({ type: 'op', op });
-  }, [outgoing]);
+    const connection = syncingRef.current;
+    if (!connection) {
+      return;
+    }
+    for (const op of outgoing) {
+      if (op.type === 'setImage' && !sentImagesRef.current.has(op.image.id)) {
+        const bytes = images.get(op.image.id);
+        if (bytes) {
+          connection.sendImageBytes(op.image.id, bytes);
+          sentImagesRef.current.add(op.image.id);
+        }
+      }
+      connection.send({ type: 'op', op });
+    }
+  }, [outgoing, images]);
 
   // Report when the visible area (screen size, zoom, pan) or the paper size changes.
   // It does not change during a pinch, only once when it ends
   useEffect(() => {
-    if (status !== 'connected') return;
+    if (status !== 'connected') {
+      return;
+    }
     syncingRef.current?.send({ type: 'resize', viewport, page });
   }, [viewport, page, status]);
 

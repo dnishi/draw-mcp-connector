@@ -15,14 +15,22 @@ function createHistory(overrides: Partial<History> = {}): History {
   };
 }
 
+/** Defaults for the image props (only the tests that need them override) */
+function createImageProps() {
+  return {
+    onImport: vi.fn(),
+    imageMove: false,
+    onImageMoveChange: vi.fn(),
+    canMoveImage: false,
+  };
+}
+
 function renderToolbar(props: Partial<ComponentProps<typeof Toolbar>> = {}) {
   const all: ComponentProps<typeof Toolbar> = {
     tool: 'pen',
     onToolChange: vi.fn(),
     fingerDrawing: true,
     onFingerDrawingChange: vi.fn(),
-    showGrid: false,
-    onShowGridChange: vi.fn(),
     penColor: '#000000',
     onPenColorChange: vi.fn(),
     customColor: null,
@@ -36,23 +44,23 @@ function renderToolbar(props: Partial<ComponentProps<typeof Toolbar>> = {}) {
     onResetView: vi.fn(),
     canClear: true,
     onClear: vi.fn(),
+    ...createImageProps(),
     ...props,
   };
   render(<Toolbar {...all} />);
   return all;
 }
 
-/** Remembers the chosen tool (like CanvasPage, the tool is held outside Toolbar) */
+/** Remembers the selected tool and move mode (held outside Toolbar, like CanvasPage) */
 function StatefulToolbar(props: Partial<ComponentProps<typeof Toolbar>>) {
   const [tool, setTool] = useState<ComponentProps<typeof Toolbar>['tool']>(
     props.tool ?? 'pen',
   );
+  const [imageMove, setImageMove] = useState(props.imageMove ?? false);
   return (
     <Toolbar
       fingerDrawing
       onFingerDrawingChange={vi.fn()}
-      showGrid={false}
-      onShowGridChange={vi.fn()}
       penColor="#000000"
       onPenColorChange={vi.fn()}
       customColor={null}
@@ -66,9 +74,12 @@ function StatefulToolbar(props: Partial<ComponentProps<typeof Toolbar>>) {
       onResetView={vi.fn()}
       canClear
       onClear={vi.fn()}
+      {...createImageProps()}
       {...props}
       tool={tool}
       onToolChange={setTool}
+      imageMove={imageMove}
+      onImageMoveChange={setImageMove}
     />
   );
 }
@@ -266,14 +277,37 @@ describe('Toolbar', () => {
     expect(onFingerDrawingChange).toHaveBeenCalledWith(false);
   });
 
-  it('グリッドの表示を切り替えられる', async () => {
-    const { onShowGridChange } = renderToolbar({ showGrid: false });
-    const toggle = screen.getByRole('button', { name: 'Show Grid' });
-    expect(toggle).toHaveAttribute('aria-pressed', 'false');
+  describe('画像', () => {
+    const importButton = () =>
+      screen.getByRole('button', { name: 'Import Image' });
+    const moveButton = () => screen.getByRole('button', { name: 'Move Image' });
 
-    await userEvent.click(toggle);
+    it('取り込みボタンを押すと、ファイルを選ぶ画面を開く', async () => {
+      const { onImport } = renderToolbar();
 
-    expect(onShowGridChange).toHaveBeenCalledWith(true);
+      await userEvent.click(importButton());
+
+      expect(onImport).toHaveBeenCalledOnce();
+    });
+
+    it('画像が置いてなければ、移動モードにはできない', () => {
+      renderToolbar({ canMoveImage: false });
+
+      expect(moveButton()).toBeDisabled();
+    });
+
+    // Move mode is remembered outside, like CanvasPage, so press it with StatefulToolbar.
+    // The size and delete popover appears near the image when it is clicked (ImageSettingsPopover)
+    it('移動モードに切り替えるだけで、吹き出しは出さない', async () => {
+      render(<StatefulToolbar canMoveImage />);
+
+      await userEvent.click(moveButton());
+
+      expect(moveButton()).toHaveAttribute('aria-pressed', 'true');
+      expect(
+        screen.queryByRole('dialog', { name: 'Image Settings' }),
+      ).not.toBeInTheDocument();
+    });
   });
 
   it('ペンのアイコンは、選んでいる色で描く', () => {
@@ -374,7 +408,7 @@ describe('Toolbar', () => {
       const dialog = await screen.findByRole('alertdialog');
       expect(dialog).toHaveTextContent('Clear the canvas?');
       expect(dialog).toHaveTextContent(
-        "All strokes will be erased. You can't undo this action.",
+        "All strokes and the image will be erased. You can't undo this action.",
       );
       expect(onClear).not.toHaveBeenCalled();
 

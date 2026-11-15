@@ -11,7 +11,9 @@ export interface ConnectionInfo {
 }
 
 function hexToBytes(hex: string): Uint8Array<ArrayBuffer> | null {
-  if (!/^(?:[0-9a-f]{2})+$/i.test(hex)) return null;
+  if (!/^(?:[0-9a-f]{2})+$/i.test(hex)) {
+    return null;
+  }
   const bytes = new Uint8Array(hex.length / 2);
   for (let i = 0; i < bytes.length; i++) {
     bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
@@ -30,8 +32,12 @@ export function parseConnectionInfo(
   const port = Number(params.get('port'));
   const certificateHash = hexToBytes(params.get('hash') ?? '');
   const token = params.get('token');
-  if (!ip || !Number.isInteger(port) || port <= 0 || !token) return null;
-  if (certificateHash?.length !== 32) return null;
+  if (!ip || !Number.isInteger(port) || port <= 0 || !token) {
+    return null;
+  }
+  if (certificateHash?.length !== 32) {
+    return null;
+  }
 
   // IPv6 addresses are enclosed in [] in URLs
   const host = ip.includes(':') ? `[${ip}]` : ip;

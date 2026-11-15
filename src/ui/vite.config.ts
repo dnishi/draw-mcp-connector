@@ -39,7 +39,9 @@ function packageLicense(root: string, name: string): PackageLicense {
   const file = fs
     .readdirSync(dir)
     .find((entry) => /^(licen[cs]e|copying)/i.test(entry));
-  if (!file) throw new Error(`${name} に LICENSE ファイルが無い`);
+  if (!file) {
+    throw new Error(`${name} に LICENSE ファイルが無い`);
+  }
   const text = fs.readFileSync(path.join(dir, file), 'utf-8').trim();
   return { name, version, identifier: license, text };
 }
@@ -70,7 +72,9 @@ function licensesFile(): Plugin {
       root = config.root;
     },
     writeBundle({ dir }) {
-      if (!dir) return;
+      if (!dir) {
+        return;
+      }
       const read = (file: string) =>
         fs.readFileSync(path.join(root, file), 'utf-8');
       const viteJson = path.join(dir, VITE_LICENSE_JSON);

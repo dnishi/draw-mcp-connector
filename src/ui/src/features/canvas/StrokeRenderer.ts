@@ -10,6 +10,8 @@ declare const GPUBufferUsage: {
 };
 declare const GPUTextureUsage: {
   readonly RENDER_ATTACHMENT: number;
+  readonly TEXTURE_BINDING: number;
+  readonly COPY_DST: number;
 };
 declare const GPUShaderStage: {
   readonly VERTEX: number;
@@ -32,6 +34,10 @@ const VIEWPORT_BYTES = 8 * Float32Array.BYTES_PER_ELEMENT;
 const VIEW_OFFSET_BYTES = 2 * Float32Array.BYTES_PER_ELEMENT;
 /** Offset of pixelRatio within Viewport (after scale) */
 const PIXEL_RATIO_OFFSET_BYTES = 5 * Float32Array.BYTES_PER_ELEMENT;
+/** Position of lod in Viewport (after pixelRatio) */
+const IMAGE_LOD_OFFSET_BYTES = 6 * Float32Array.BYTES_PER_ELEMENT;
+/** Format of the image texture (also the render target when building the mip chain) */
+const IMAGE_TEXTURE_FORMAT: GPUTextureFormat = 'rgba8unorm';
 
 // Vertices are passed in canvas coordinates (CSS pixels); the shader zooms and pans them, then
 // converts to clip coordinates (-1 at the bottom left, 1 at the top right). Zooming needs no vertex rebuild
@@ -44,6 +50,8 @@ struct Viewport {
   scale: f32,
   // Render pixels per CSS pixel (devicePixelRatio)
   pixelRatio: f32,
+  // Mip level of the image to read (passed from the CPU in draw(); 0 when enlarged)
+  lod: f32,
 };
 @group(0) @binding(0) var<uniform> viewport: Viewport;
 
@@ -65,8 +73,58 @@ fn fs(@location(0) color: vec3f) -> @location(0) vec4f {
   return vec4f(color, 1.0);
 }
 
-// Grid: draw one triangle covering the whole view, and color each pixel by its distance to the nearest grid line.
-// Spacing is in canvas coordinates (it widens when zooming in); line width stays 1 CSS pixel on the view at any zoom
+// Image: stretched over the placement rectangle (under the strokes). Alpha is blended, so transparent parts show what is below
+@group(0) @binding(1) var imageTexture: texture_2d<f32>;
+@group(0) @binding(2) var imageSampler: sampler;
+
+struct ImageVertexOutput {
+  @builtin(position) position: vec4f,
+  @location(0) uv: vec2f,
+};
+
+@vertex
+fn vsImage(@location(0) position: vec2f, @location(1) uv: vec2f) -> ImageVertexOutput {
+  let screen = (position - viewport.origin) * viewport.scale;
+  let clip = screen / viewport.size * vec2f(2.0, -2.0) + vec2f(-1.0, 1.0);
+  return ImageVertexOutput(vec4f(clip, 0.0, 1.0), uv);
+}
+
+// textureSampleLevel instead of textureSample: implicit LOD is not available in a multisampled pass.
+// The level to read is computed on the CPU from how many screen pixels one image pixel becomes (viewport.lod).
+// When shrunk it reads from the mip chain (#buildMipLevels), so thin lines do not break up or flicker
+@fragment
+fn fsImage(@location(0) uv: vec2f) -> @location(0) vec4f {
+  return textureSampleLevel(imageTexture, imageSampler, uv, viewport.lod);
+}
+
+// Building the mip chain: draws the half-size image of the level above, stretched to fill the target level
+// (a 2×2 average with the linear filter). WebGPU has no function to build mip chains, so
+// each level is drawn by our own code (https://www.w3.org/TR/webgpu/)
+@group(0) @binding(0) var mipSource: texture_2d<f32>;
+@group(0) @binding(1) var mipSampler: sampler;
+
+struct MipVertexOutput {
+  @builtin(position) position: vec4f,
+  @location(0) uv: vec2f,
+};
+
+@vertex
+fn vsMip(@builtin(vertex_index) index: u32) -> MipVertexOutput {
+  // The corners of a triangle covering the whole screen point at (0, 0) to (1, 1) of mipSource
+  // (y=1 in clip space is the top of the screen = row 0 of the texture)
+  var corners = array(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  let corner = corners[index];
+  let uv = corner * vec2f(0.5, -0.5) + vec2f(0.5, 0.5);
+  return MipVertexOutput(vec4f(corner, 0.0, 1.0), uv);
+}
+
+@fragment
+fn fsMip(@location(0) uv: vec2f) -> @location(0) vec4f {
+  return textureSampleLevel(mipSource, mipSampler, uv, 0.0);
+}
+
+// Grid: draws one triangle covering the whole screen and colors each pixel by its distance to the nearest grid line.
+// The spacing is in canvas coordinates (widens when zoomed in); the line width stays 1 CSS pixel on screen when zoomed
 const GRID_SPACING = ${GRID_SPACING}.0;
 // Very light gray (#eeeeee)
 const GRID_COLOR = vec3f(0.933, 0.933, 0.933);
@@ -118,9 +176,32 @@ export async function requestGpuDevice(): Promise<GPUDevice> {
     );
   }
   const adapter = await navigator.gpu.requestAdapter();
-  if (!adapter) throw new Error("Couldn't get a WebGPU adapter.");
-  return adapter.requestDevice();
+  if (!adapter) {
+    throw new Error("Couldn't get a WebGPU adapter.");
+  }
+  const device = await adapter.requestDevice();
+  // Validation errors (such as binding mismatches, where commands are discarded) appear in the console
+  // once a handler is attached. This makes silent drawing bugs traceable during development
+  device.onuncapturederror = (event: GPUUncapturedErrorEvent) => {
+    console.error(
+      `[WebGPU] ${event.error.constructor.name}: ${event.error.message}`,
+    );
+  };
+  return device;
 }
+
+/** Image laid underneath: the decoded bitmap and its placement on the canvas */
+export interface ImageUnderlay {
+  bitmap: ImageBitmap;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** One image vertex: x, y (canvas coordinates) and u, v (position within the image) */
+const FLOATS_PER_IMAGE_VERTEX = 4;
+const IMAGE_VERTEX_COUNT = 6;
 
 /** Draws stroke triangles onto the canvas with WebGPU */
 export class StrokeRenderer {
@@ -130,10 +211,18 @@ export class StrokeRenderer {
   readonly #format: GPUTextureFormat;
   readonly #pipeline: GPURenderPipeline;
   readonly #gridPipeline: GPURenderPipeline;
+  readonly #imagePipeline: GPURenderPipeline;
+  readonly #mipPipeline: GPURenderPipeline;
+  readonly #sampler: GPUSampler;
   readonly #viewportBuffer: GPUBuffer;
   readonly #bindGroup: GPUBindGroup;
   #vertexBuffer: GPUBuffer | null = null;
   #msaaTexture: GPUTexture | null = null;
+  #devicePixelRatio = 1;
+  #imageBitmap: ImageBitmap | null = null;
+  #imageTexture: GPUTexture | null = null;
+  #imageBindGroup: GPUBindGroup | null = null;
+  #imageVertexBuffer: GPUBuffer | null = null;
 
   constructor(canvas: HTMLCanvasElement, device: GPUDevice) {
     const context = canvas.getContext('webgpu');
@@ -196,6 +285,73 @@ export class StrokeRenderer {
       primitive: { topology: 'triangle-list' },
       multisample,
     });
+    // The image uses a texture and a sampler in addition to Viewport, so it gets its own layout
+    this.#imagePipeline = device.createRenderPipeline({
+      layout: 'auto',
+      vertex: {
+        module,
+        entryPoint: 'vsImage',
+        buffers: [
+          {
+            arrayStride:
+              FLOATS_PER_IMAGE_VERTEX * Float32Array.BYTES_PER_ELEMENT,
+            attributes: [
+              // x, y (canvas coordinates)
+              { shaderLocation: 0, offset: 0, format: 'float32x2' },
+              // u, v (position within the image)
+              {
+                shaderLocation: 1,
+                offset: 2 * Float32Array.BYTES_PER_ELEMENT,
+                format: 'float32x2',
+              },
+            ],
+          },
+        ],
+      },
+      fragment: {
+        module,
+        entryPoint: 'fsImage',
+        targets: [
+          {
+            format: this.#format,
+            blend: {
+              color: {
+                // The texture holds colors premultiplied by alpha (premultipliedAlpha in
+                // #syncImageTexture). Linear interpolation without premultiplying bleeds the color of
+                // transparent parts into the edges
+                srcFactor: 'one',
+                dstFactor: 'one-minus-src-alpha',
+              },
+              alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha' },
+            },
+          },
+        ],
+      },
+      // The default cullMode in the spec (W3C WebGPU) is "none", but this is a quad, so state
+      // explicitly that it is not culled (so it does not vanish if implementations differ or the default changes)
+      primitive: { topology: 'triangle-list', cullMode: 'none' },
+      multisample,
+    });
+    // Building the mip chain: reads the texture of the level above and writes into the half-size level.
+    // Colors are written as is (the premultiplied colors in the texture are not diluted), so there is no blending
+    this.#mipPipeline = device.createRenderPipeline({
+      layout: 'auto',
+      vertex: { module, entryPoint: 'vsMip' },
+      fragment: {
+        module,
+        entryPoint: 'fsMip',
+        targets: [{ format: IMAGE_TEXTURE_FORMAT }],
+      },
+      primitive: { topology: 'triangle-list' },
+    });
+    // mipmapFilter: when shrinking an image, also blends linearly between the two levels adjacent to the computed level (lod).
+    // Building the mip chain (#mipPipeline) uses the same sampler (it only reads views narrowed
+    // to one level, so mipmapFilter has no effect)
+    this.#sampler = device.createSampler({
+      magFilter: 'linear',
+      minFilter: 'linear',
+      mipmapFilter: 'linear',
+    });
 
     this.#viewportBuffer = device.createBuffer({
       size: VIEWPORT_BYTES,
@@ -209,6 +365,7 @@ export class StrokeRenderer {
 
   /** Changes the render resolution to match the display size (CSS pixels) */
   resize(cssWidth: number, cssHeight: number, devicePixelRatio: number): void {
+    this.#devicePixelRatio = devicePixelRatio;
     this.#canvas.width = Math.max(1, Math.round(cssWidth * devicePixelRatio));
     this.#canvas.height = Math.max(1, Math.round(cssHeight * devicePixelRatio));
     this.#device.queue.writeBuffer(
@@ -232,11 +389,13 @@ export class StrokeRenderer {
   }
 
   /**
-   * Redraws vertices (triangle-list, canvas coordinates) over the whole view with the view's zoom and position.
-   * If showGrid, draws the grid under the strokes
+   * Redraws the whole screen with vertices (triangle-list, canvas coordinates) at the zoom and position of view.
+   * The order is white background → grid → image (image, under the strokes) → strokes
    */
-  draw(vertices: Float32Array, view: View, showGrid: boolean): void {
-    if (!this.#msaaTexture) return;
+  draw(vertices: Float32Array, view: View, image?: ImageUnderlay): void {
+    if (!this.#msaaTexture) {
+      return;
+    }
 
     this.#device.queue.writeBuffer(
       this.#viewportBuffer,
@@ -244,6 +403,20 @@ export class StrokeRenderer {
       new Float32Array([view.originX, view.originY, view.scale]),
     );
 
+    if (image) {
+      this.#syncImageTexture(image.bitmap);
+      // How many drawing pixels one image pixel becomes (placement width × display zoom × devicePixelRatio).
+      // Read from the mip chain by the amount it shrinks below 1 (log2). 0 (level 0) when enlarged
+      const screenPerSourcePixel =
+        (image.width * view.scale * this.#devicePixelRatio) /
+        image.bitmap.width;
+      const lod = Math.max(0, -Math.log2(screenPerSourcePixel));
+      this.#device.queue.writeBuffer(
+        this.#viewportBuffer,
+        IMAGE_LOD_OFFSET_BYTES,
+        new Float32Array([lod]),
+      );
+    }
     const vertexCount = vertices.length / FLOATS_PER_VERTEX;
     const vertexBuffer = vertexCount > 0 ? this.#writeVertices(vertices) : null;
 
@@ -260,12 +433,27 @@ export class StrokeRenderer {
       ],
     });
     pass.setBindGroup(0, this.#bindGroup);
-    if (showGrid) {
-      pass.setPipeline(this.#gridPipeline);
-      pass.draw(3);
+    pass.setPipeline(this.#gridPipeline);
+    pass.draw(3);
+    if (image && this.#imageTexture && this.#imageBindGroup) {
+      pass.setPipeline(this.#imagePipeline);
+      pass.setBindGroup(0, this.#imageBindGroup);
+      pass.setVertexBuffer(
+        0,
+        this.#writeImageQuad(image),
+        0,
+        IMAGE_VERTEX_COUNT *
+          FLOATS_PER_IMAGE_VERTEX *
+          Float32Array.BYTES_PER_ELEMENT,
+      );
+      pass.draw(IMAGE_VERTEX_COUNT);
     }
     if (vertexBuffer) {
+      // The spec checks binding consistency at draw time, but to avoid setting the shared bind group
+      // (binding 0 only) under the image pipeline (which has 3 bindings with layout: 'auto'),
+      // switch the pipeline first and then set the bind group
       pass.setPipeline(this.#pipeline);
+      pass.setBindGroup(0, this.#bindGroup);
       pass.setVertexBuffer(0, vertexBuffer, 0, vertices.byteLength);
       pass.draw(vertexCount);
     }
@@ -274,14 +462,147 @@ export class StrokeRenderer {
   }
 
   destroy(): void {
+    this.#imageTexture?.destroy();
     this.#device.destroy();
   }
 
-  /** Writes to the vertex buffer. If it is too small, recreates it, doubling the size as needed */
+  /** Reloads only a replaced image into the GPU texture (including the mip chain) */
+  #syncImageTexture(bitmap: ImageBitmap): void {
+    if (this.#imageBitmap === bitmap && this.#imageTexture) {
+      return;
+    }
+    this.#imageTexture?.destroy();
+    // Number of levels: down to the level where the longer side is 1 pixel (level L is 1/2^L of the original, rounded down)
+    const mipLevelCount =
+      1 + Math.floor(Math.log2(Math.max(bitmap.width, bitmap.height)));
+    this.#imageTexture = this.#device.createTexture({
+      size: [bitmap.width, bitmap.height],
+      format: IMAGE_TEXTURE_FORMAT,
+      mipLevelCount,
+      // The spec requires RENDER_ATTACHMENT in addition to COPY_DST for the destination of
+      // copyExternalImageToTexture (without it only the copy is discarded with a validation error,
+      // and it is drawn fully transparent so the image is invisible). Also used as the target for drawing the mip chain level by level
+      usage:
+        GPUTextureUsage.TEXTURE_BINDING |
+        GPUTextureUsage.COPY_DST |
+        GPUTextureUsage.RENDER_ATTACHMENT,
+    });
+    // premultipliedAlpha loads the colors into the texture premultiplied by alpha
+    // (the pipeline's blend srcFactor is 'one').
+    // flipY defaults to false, so it is loaded without flipping (row 1 is row 0 of the texture).
+    // uv is used as is (#writeImageQuad)
+    this.#device.queue.copyExternalImageToTexture(
+      { source: bitmap },
+      { texture: this.#imageTexture, premultipliedAlpha: true },
+      [bitmap.width, bitmap.height],
+    );
+    this.#buildMipLevels(mipLevelCount);
+    this.#imageBindGroup = this.#device.createBindGroup({
+      layout: this.#imagePipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: this.#viewportBuffer } },
+        { binding: 1, resource: this.#imageTexture.createView() },
+        { binding: 2, resource: this.#sampler },
+      ],
+    });
+    this.#imageBitmap = bitmap;
+  }
+
+  /** Builds level 1 onward of a texture whose level 0 is loaded, drawing each at half size */
+  #buildMipLevels(mipLevelCount: number): void {
+    const texture = this.#imageTexture;
+    if (!texture || mipLevelCount < 2) {
+      return;
+    }
+    const encoder = this.#device.createCommandEncoder();
+    let source = texture.createView({ baseMipLevel: 0, mipLevelCount: 1 });
+    for (let level = 1; level < mipLevelCount; level++) {
+      // Different levels of the same texture, so the read source and the write target do not overlap
+      const target = texture.createView({
+        baseMipLevel: level,
+        mipLevelCount: 1,
+      });
+      const pass = encoder.beginRenderPass({
+        colorAttachments: [
+          {
+            view: target,
+            clearValue: WHITE,
+            loadOp: 'clear',
+            storeOp: 'store',
+          },
+        ],
+      });
+      pass.setPipeline(this.#mipPipeline);
+      pass.setBindGroup(
+        0,
+        this.#device.createBindGroup({
+          layout: this.#mipPipeline.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: source },
+            { binding: 1, resource: this.#sampler },
+          ],
+        }),
+      );
+      pass.draw(3);
+      pass.end();
+      source = target;
+    }
+    this.#device.queue.submit([encoder.finish()]);
+  }
+
+  /** Turns the placement rectangle into two triangles with uv */
+  #writeImageQuad(image: ImageUnderlay): GPUBuffer {
+    const { x, y, width, height } = image;
+    if (!this.#imageVertexBuffer) {
+      this.#imageVertexBuffer = this.#device.createBuffer({
+        size:
+          IMAGE_VERTEX_COUNT *
+          FLOATS_PER_IMAGE_VERTEX *
+          Float32Array.BYTES_PER_ELEMENT,
+        usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+      });
+    }
+    // The top edge (canvas y) is v=0 and the bottom edge (y + height) is v=1 (same as the texture row direction)
+    this.#device.queue.writeBuffer(
+      this.#imageVertexBuffer,
+      0,
+      new Float32Array([
+        x,
+        y,
+        0,
+        0,
+        x + width,
+        y,
+        1,
+        0,
+        x,
+        y + height,
+        0,
+        1,
+        x + width,
+        y,
+        1,
+        0,
+        x + width,
+        y + height,
+        1,
+        1,
+        x,
+        y + height,
+        0,
+        1,
+      ]),
+    );
+    return this.#imageVertexBuffer;
+  }
+
+  /** Writes into the vertex buffer. Recreates it twice as large when it is too small */
   #writeVertices(vertices: Float32Array): GPUBuffer {
     if (!this.#vertexBuffer || this.#vertexBuffer.size < vertices.byteLength) {
       let size = this.#vertexBuffer?.size ?? MIN_VERTEX_BUFFER_BYTES;
-      while (size < vertices.byteLength) size *= 2;
+      while (size < vertices.byteLength) {
+        size *= 2;
+      }
 
       this.#vertexBuffer?.destroy();
       this.#vertexBuffer = this.#device.createBuffer({

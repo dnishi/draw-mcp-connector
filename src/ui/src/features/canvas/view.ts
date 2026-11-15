@@ -123,7 +123,9 @@ export class PinchTracker {
     pointerId: number,
     screen: Point,
   ): { before: FingerPair; after: FingerPair } | null {
-    if (!this.#fingers.has(pointerId)) return null;
+    if (!this.#fingers.has(pointerId)) {
+      return null;
+    }
     const before = this.#pair();
     this.#fingers.set(pointerId, screen);
     const after = this.#pair();

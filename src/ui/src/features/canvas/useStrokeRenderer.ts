@@ -17,12 +17,16 @@ export function useStrokeRenderer(
 
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    if (!canvas) {
+      return;
+    }
 
     let disposed = false;
     let renderer: StrokeRenderer | null = null;
     const fail = (error: unknown) => {
-      if (disposed) return;
+      if (disposed) {
+        return;
+      }
       setState({
         renderer: null,
         error: error instanceof Error ? error.message : String(error),
@@ -37,8 +41,9 @@ export function useStrokeRenderer(
           return;
         }
         device.lost.then((info) => {
-          if (info.reason !== 'destroyed')
+          if (info.reason !== 'destroyed') {
             fail(`WebGPU stopped: ${info.message}`);
+          }
         });
         renderer = new StrokeRenderer(canvas, device);
         setState({ renderer, error: null });

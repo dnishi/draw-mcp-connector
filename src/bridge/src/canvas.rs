@@ -2,18 +2,23 @@
 
 use std::collections::{HashSet, VecDeque};
 use std::net::IpAddr;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use tokio::sync::broadcast;
 
 use crate::lock::lock;
-use crate::protocol::{CanvasOp, PageSize, Stroke, Viewport};
+use crate::protocol::{CanvasOp, ImagePlacement, PageSize, Stroke, Viewport};
+use crate::render::StoredImage;
 
 /// Number of changes remembered to return diffs. Diffs from older revisions are returned as the whole canvas
 const MAX_LOG_LEN: usize = 10_000;
 
-/// Who made a change. Used to avoid sending a change back to its sender
+/// Number of image byte arrays to keep. Used when undo/redo brings back an old ID, and
+/// for handing them to pages that connect later. The oldest are dropped first
+const MAX_IMAGE_ENTRIES: usize = 8;
+
+/// Who made the change. Used to avoid sending a change back to its sender
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Origin {
     /// A connection to a canvas page (numbered per connection)
@@ -49,6 +54,35 @@ pub struct Snapshot {
     pub views: Vec<CanvasView>,
     /// Stacking order (later is on top)
     pub strokes: Vec<Stroke>,
+    /// The image placed under the strokes (one at most for now)
+    pub image: Option<ImagePlacement>,
+}
+
+/// Images looked up by ID (the bytes and their decoded result). Kept in arrival order; the oldest are dropped when there are too many.
+/// When the contents for the same ID arrive again the whole entry is replaced, so no decoded result of the old contents remains
+#[derive(Default)]
+struct ImageData {
+    entries: VecDeque<(String, Arc<StoredImage>)>,
+}
+
+impl ImageData {
+    fn put(&mut self, id: &str, image: Arc<StoredImage>) {
+        if let Some(entry) = self.entries.iter_mut().find(|(stored, _)| stored == id) {
+            entry.1 = image;
+        } else {
+            self.entries.push_back((id.to_string(), image));
+        }
+        while self.entries.len() > MAX_IMAGE_ENTRIES {
+            self.entries.pop_front();
+        }
+    }
+
+    fn get(&self, id: &str) -> Option<Arc<StoredImage>> {
+        self.entries
+            .iter()
+            .find(|(stored, _)| stored == id)
+            .map(|(_, image)| Arc::clone(image))
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -63,6 +97,10 @@ pub enum ChangesSince {
 #[derive(Default)]
 struct State {
     strokes: Vec<Stroke>,
+    /// The image placed under the strokes (one at most for now)
+    image: Option<ImagePlacement>,
+    /// Image byte arrays (looked up by the placement ID)
+    image_data: ImageData,
     revision: u64,
     /// In order of connection number
     views: Vec<CanvasView>,
@@ -103,6 +141,14 @@ impl State {
                 self.strokes[index] = stroke.clone();
                 Some(CanvasOp::Replace { stroke })
             }
+            CanvasOp::SetImage { image } => {
+                if self.image.as_ref() == Some(&image) {
+                    return None;
+                }
+                self.image = Some(image.clone());
+                Some(CanvasOp::SetImage { image })
+            }
+            CanvasOp::RemoveImage => self.image.take().map(|_| CanvasOp::RemoveImage),
         }
     }
 
@@ -119,6 +165,7 @@ impl State {
             revision: self.revision,
             views: self.views.clone(),
             strokes: self.strokes.clone(),
+            image: self.image.clone(),
         }
     }
 }
@@ -126,6 +173,8 @@ impl State {
 pub struct Canvas {
     state: Mutex<State>,
     changes: broadcast::Sender<Change>,
+    /// Tells connections that an image's contents have arrived (same mechanism as stroke changes)
+    images_ready: broadcast::Sender<String>,
 }
 
 impl Canvas {
@@ -133,6 +182,8 @@ impl Canvas {
         Self {
             state: Mutex::default(),
             changes: broadcast::channel(1024).0,
+            // A short queue that just remembers what arrived is enough. Missed notices are recovered by recounting
+            images_ready: broadcast::channel(64).0,
         }
     }
 
@@ -194,10 +245,35 @@ impl Canvas {
         }
     }
 
-    /// Gets a snapshot of the whole canvas and a receiver for later changes at the same time (so no change in between is missed)
-    pub fn subscribe(&self) -> (Vec<Stroke>, broadcast::Receiver<Change>) {
+    /// Gets a full copy and a receiver for later changes at the same time (no change in between is missed)
+    pub fn subscribe(&self) -> (Snapshot, broadcast::Receiver<Change>) {
         let state = self.state();
-        (state.strokes.clone(), self.changes.subscribe())
+        (state.snapshot(), self.changes.subscribe())
+    }
+
+    /// Stores an image's bytes (they may arrive before the placement). The same ID is replaced.
+    /// Announces the arrived ID so that connections waiting for the contents can act on it
+    pub fn put_image_data(&self, id: &str, bytes: Vec<u8>) {
+        self.state()
+            .image_data
+            .put(id, Arc::new(StoredImage::new(bytes)));
+        // Failing to send when there is no receiver is fine (same as stroke changes)
+        let _ = self.images_ready.send(id.to_string());
+    }
+
+    /// Looks up an image by placement ID. Decoding the PNG happens after taking it out here (outside the lock)
+    pub fn image_data(&self, id: &str) -> Option<Arc<StoredImage>> {
+        self.state().image_data.get(id)
+    }
+
+    /// Placement of the image currently placed
+    pub fn image(&self) -> Option<ImagePlacement> {
+        self.state().image.clone()
+    }
+
+    /// Receiver for notices that an image's contents arrived (used to send images requested before their contents arrived)
+    pub fn subscribe_images(&self) -> broadcast::Receiver<String> {
+        self.images_ready.subscribe()
     }
 }
 
@@ -318,5 +394,69 @@ mod tests {
         canvas.apply(Origin::Connection(7), insert("a", 0));
         let change = changes.try_recv().unwrap();
         assert_eq!(change.origin, Origin::Connection(7));
+    }
+
+    fn placement(id: &str) -> ImagePlacement {
+        ImagePlacement {
+            id: id.into(),
+            x: 1.0,
+            y: 2.0,
+            width: 3.0,
+            height: 4.0,
+        }
+    }
+
+    #[test]
+    fn image_ops_keep_a_single_image() {
+        let canvas = Canvas::new();
+        assert_eq!(
+            canvas.apply(Origin::Ai, CanvasOp::RemoveImage),
+            None,
+            "画像が無ければ無視"
+        );
+        let set = CanvasOp::SetImage {
+            image: placement("a"),
+        };
+        assert_eq!(canvas.apply(Origin::Ai, set.clone()), Some(set.clone()));
+        assert_eq!(canvas.apply(Origin::Ai, set), None, "同じ配置なら変更なし");
+        let moved = CanvasOp::SetImage {
+            image: ImagePlacement {
+                x: 9.0,
+                ..placement("a")
+            },
+        };
+        assert_eq!(canvas.apply(Origin::Ai, moved.clone()), Some(moved));
+        // One image at most for now, so placing a different ID replaces it
+        let swapped = CanvasOp::SetImage {
+            image: placement("b"),
+        };
+        assert_eq!(canvas.apply(Origin::Ai, swapped.clone()), Some(swapped));
+        assert_eq!(canvas.snapshot().image, Some(placement("b")));
+        assert_eq!(
+            canvas.apply(Origin::Ai, CanvasOp::RemoveImage),
+            Some(CanvasOp::RemoveImage)
+        );
+        assert_eq!(canvas.snapshot().image, None);
+    }
+
+    #[test]
+    fn image_data_is_kept_by_id_and_evicted_from_the_oldest() {
+        let canvas = Canvas::new();
+        canvas.put_image_data("a", vec![1]);
+        canvas.put_image_data("a", vec![2]);
+        assert_eq!(canvas.image_data("a").unwrap().bytes(), [2]);
+        for i in 0..MAX_IMAGE_ENTRIES {
+            canvas.put_image_data(&format!("x{i}"), vec![i as u8]);
+        }
+        assert!(canvas.image_data("a").is_none(), "古い順に捨てる");
+        assert!(canvas.image_data("x0").is_some());
+    }
+
+    #[test]
+    fn put_image_data_notifies_subscribers() {
+        let canvas = Canvas::new();
+        let mut ready = canvas.subscribe_images();
+        canvas.put_image_data("a", vec![1]);
+        assert_eq!(ready.try_recv().unwrap(), "a");
     }
 }

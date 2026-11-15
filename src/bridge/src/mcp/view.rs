@@ -11,8 +11,8 @@ use rmcp::model::{CallToolResult, ContentBlock};
 use serde::Serialize;
 
 use crate::canvas::{CanvasView, ChangesSince, Snapshot};
-use crate::protocol::{Author, CanvasOp, Stroke};
-use crate::render::{self, Rect};
+use crate::protocol::{Author, CanvasOp, ImagePlacement, Stroke};
+use crate::render::{self, Rect, StoredImage};
 
 /// Bounds in integer CSS pixels
 #[derive(Debug, PartialEq, Serialize)]
@@ -60,12 +60,47 @@ impl From<&Stroke> for StrokeSummary {
     }
 }
 
+/// Description of the image placed under the strokes. The original pixels are read by ID with read_image
+#[derive(Serialize)]
+struct PlacedImage {
+    id: String,
+    /// Area the image covers (the placement itself, as integers rounded outward)
+    bounds: PixelBounds,
+}
+
+impl From<&ImagePlacement> for PlacedImage {
+    fn from(image: &ImagePlacement) -> Self {
+        Self {
+            id: image.id.clone(),
+            bounds: PixelBounds::from(Rect {
+                x: image.x,
+                y: image.y,
+                width: image.width,
+                height: image.height,
+            }),
+        }
+    }
+}
+
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 enum OpSummary {
-    Insert { stroke: StrokeSummary, index: usize },
-    Remove { ids: Vec<String> },
-    Replace { stroke: StrokeSummary },
+    Insert {
+        stroke: StrokeSummary,
+        index: usize,
+    },
+    Remove {
+        ids: Vec<String>,
+    },
+    Replace {
+        stroke: StrokeSummary,
+    },
+    /// Places, moves or resizes the image (always under the strokes)
+    SetImage {
+        image: PlacedImage,
+    },
+    /// Removes the image
+    RemoveImage,
 }
 
 impl From<&CanvasOp> for OpSummary {
@@ -79,6 +114,10 @@ impl From<&CanvasOp> for OpSummary {
             CanvasOp::Replace { stroke } => Self::Replace {
                 stroke: stroke.into(),
             },
+            CanvasOp::SetImage { image } => Self::SetImage {
+                image: image.into(),
+            },
+            CanvasOp::RemoveImage => Self::RemoveImage,
         }
     }
 }
@@ -101,7 +140,10 @@ struct CanvasSummary {
     canvases: Vec<CanvasView>,
     /// No image is returned when there is nothing to draw
     image: Option<ImageInfo>,
-    /// Stacking order (later is on top). Absent when asked to omit it
+    /// The image placed under the strokes. Absent if there is none
+    #[serde(rename = "placedImage", skip_serializing_if = "Option::is_none")]
+    placed_image: Option<PlacedImage>,
+    /// Stacking order (later ones are on top). Absent when asked to omit it
     #[serde(skip_serializing_if = "Option::is_none")]
     strokes: Option<Vec<StrokeSummary>>,
 }
@@ -122,9 +164,14 @@ enum ChangesSummary {
     Snapshot(CanvasSummary),
 }
 
-/// Canvas image. Returns (image description, PNG)
-fn render_image(snapshot: &Snapshot) -> Result<Option<(ImageInfo, Vec<u8>)>, ErrorData> {
-    // The whole paper and visible area of each connected page are included even with no strokes
+/// The canvas image. Returns (image description, PNG). data is the image of snapshot.image
+/// (without it the image is not passed to render, so it is neither drawn nor included in the area. The placement
+/// is passed in placedImage in the JSON)
+fn render_image(
+    snapshot: &Snapshot,
+    data: Option<&StoredImage>,
+) -> Result<Option<(ImageInfo, Vec<u8>)>, ErrorData> {
+    // The whole paper and visible area of connected pages are captured even without strokes
     let regions: Vec<Rect> = snapshot
         .views
         .iter()
@@ -135,7 +182,20 @@ fn render_image(snapshot: &Snapshot) -> Result<Option<(ImageInfo, Vec<u8>)>, Err
                 .chain([Rect::from(view.viewport)])
         })
         .collect();
-    let image = render::render(&snapshot.strokes, &regions)
+    // The image adds to the captured area only where it overlaps the paper of connected pages
+    // (outside the paper the user cannot see it either; adding it widens the area and shrinks the handwriting too).
+    // If no page is connected or no paper size has arrived, use None and add the whole image area
+    let clip = snapshot
+        .views
+        .iter()
+        .filter_map(|view| view.page)
+        .map(Rect::from)
+        .reduce(Rect::union);
+    let placed = match (&snapshot.image, data) {
+        (Some(image), Some(stored)) => Some((image, stored)),
+        _ => None,
+    };
+    let image = render::render(&snapshot.strokes, &regions, placed, clip)
         .map_err(|error| ErrorData::internal_error(format!("画像を作れない: {error}"), None))?;
     Ok(image.map(|image| {
         let info = ImageInfo {
@@ -153,7 +213,15 @@ pub fn json_block(value: &impl Serialize) -> Result<ContentBlock, ErrorData> {
     Ok(ContentBlock::text(text))
 }
 
-/// Returns the description (JSON) and, if any, the image
+/// Returns a description of the image placement and the image (PNG) at its original resolution
+pub fn placed_image_result(
+    image: &ImagePlacement,
+    png: &[u8],
+) -> Result<CallToolResult, ErrorData> {
+    result_with_image(&PlacedImage::from(image), Some(png.to_vec()))
+}
+
+/// Returns the description (JSON) and the image if there is one
 fn result_with_image(
     summary: &impl Serialize,
     png: Option<Vec<u8>>,
@@ -168,38 +236,44 @@ fn result_with_image(
 fn canvas_summary(
     snapshot: &Snapshot,
     include_strokes: bool,
+    data: Option<&StoredImage>,
 ) -> Result<(CanvasSummary, Option<Vec<u8>>), ErrorData> {
-    let (image, png) = render_image(snapshot)?.unzip();
+    let (image, png) = render_image(snapshot, data)?.unzip();
     let summary = CanvasSummary {
         revision: snapshot.revision,
         canvases: snapshot.views.clone(),
         image,
+        placed_image: snapshot.image.as_ref().map(PlacedImage::from),
         strokes: include_strokes
             .then(|| snapshot.strokes.iter().map(StrokeSummary::from).collect()),
     };
     Ok((summary, png))
 }
 
-/// Returns the description and image of the whole canvas. If include_strokes is false, omits the per-stroke list
+/// Returns a description of the whole canvas and its image. If include_strokes is false, omits the per-stroke list.
+/// data is the image of snapshot.image
 pub fn canvas_result(
     snapshot: &Snapshot,
     include_strokes: bool,
+    data: Option<&StoredImage>,
 ) -> Result<CallToolResult, ErrorData> {
-    let (summary, png) = canvas_summary(snapshot, include_strokes)?;
+    let (summary, png) = canvas_summary(snapshot, include_strokes, data)?;
     result_with_image(&summary, png)
 }
 
-/// Returns the description of the diff and the current canvas image. No image is attached when nothing changed
+/// Returns a description of the changes and the current canvas image. No image if nothing changed.
+/// data is the image of current.image
 pub fn changes_result(
     changes: &ChangesSince,
     current: &Snapshot,
+    data: Option<&StoredImage>,
 ) -> Result<CallToolResult, ErrorData> {
     let (summary, png) = match changes {
         ChangesSince::Ops { revision, ops } => {
             let (image, png) = if ops.is_empty() {
                 (None, None)
             } else {
-                render_image(current)?.unzip()
+                render_image(current, data)?.unzip()
             };
             let summary = ChangesSummary::Ops {
                 revision: *revision,
@@ -210,8 +284,9 @@ pub fn changes_result(
             (summary, png)
         }
         ChangesSince::Snapshot(snapshot) => {
-            // When a diff cannot be returned, return the whole canvas. It replaces the diff, so the stroke list is not omitted
-            let (summary, png) = canvas_summary(snapshot, true)?;
+            // When the changes cannot be returned, return the whole canvas (it is the current state, so data can be used as is).
+            // It replaces the changes, so the stroke list is not omitted
+            let (summary, png) = canvas_summary(snapshot, true, data)?;
             (ChangesSummary::Snapshot(summary), png)
         }
     };
@@ -282,7 +357,21 @@ mod tests {
             revision: 4,
             views: vec![view(2, 30.0, 20.0)],
             strokes: vec![stroke("a")],
+            image: None,
         }
+    }
+
+    /// A 2x2 solid red PNG
+    fn red_png() -> Vec<u8> {
+        let rgba: Vec<u8> = (0..4).flat_map(|_| [255u8, 0, 0, 255]).collect();
+        let mut png = Vec::new();
+        let mut encoder = png::Encoder::new(&mut png, 2, 2);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().unwrap();
+        writer.write_image_data(&rgba).unwrap();
+        writer.finish().unwrap();
+        png
     }
 
     /// JSON of canvases in snapshot()
@@ -318,7 +407,7 @@ mod tests {
 
     #[test]
     fn canvas_result_has_summary_and_png_without_points() {
-        let result = canvas_result(&snapshot(), true).unwrap();
+        let result = canvas_result(&snapshot(), true, None).unwrap();
         assert_eq!(result.content.len(), 2);
         let image = result.content[1].as_image().unwrap();
         assert_eq!(image.mime_type, "image/png");
@@ -366,8 +455,9 @@ mod tests {
             revision: 4,
             views: vec![view(1, 30.0, 20.0), view(2, 50.0, 10.0)],
             strokes: Vec::new(),
+            image: None,
         };
-        let json = summary_json(&canvas_result(&both, true).unwrap());
+        let json = summary_json(&canvas_result(&both, true, None).unwrap());
         assert_eq!(json["canvases"].as_array().unwrap().len(), 2);
         assert_eq!(json["canvases"][1]["ip"], "192.168.0.2");
         assert_eq!(
@@ -378,7 +468,7 @@ mod tests {
 
     #[test]
     fn strokes_can_be_omitted() {
-        let result = canvas_result(&snapshot(), false).unwrap();
+        let result = canvas_result(&snapshot(), false, None).unwrap();
         assert_eq!(result.content.len(), 2, "画像は返す");
         let json = summary_json(&result);
         assert!(json.get("strokes").is_none());
@@ -391,8 +481,9 @@ mod tests {
             revision: 0,
             views: Vec::new(),
             strokes: Vec::new(),
+            image: None,
         };
-        let result = canvas_result(&empty, true).unwrap();
+        let result = canvas_result(&empty, true, None).unwrap();
         assert_eq!(result.content.len(), 1);
         assert_eq!(summary_json(&result)["image"], serde_json::Value::Null);
     }
@@ -411,7 +502,7 @@ mod tests {
                 },
             ],
         };
-        let result = changes_result(&changes, &snapshot()).unwrap();
+        let result = changes_result(&changes, &snapshot(), None).unwrap();
         let json = summary_json(&result);
         assert_eq!(json["kind"], "ops");
         assert_eq!(json["ops"][0]["type"], "insert");
@@ -431,7 +522,7 @@ mod tests {
             revision: 4,
             ops: Vec::new(),
         };
-        let result = changes_result(&changes, &snapshot()).unwrap();
+        let result = changes_result(&changes, &snapshot(), None).unwrap();
         assert_eq!(result.content.len(), 1, "画像は付けない");
         assert_eq!(
             summary_json(&result),
@@ -442,5 +533,101 @@ mod tests {
                 "ops": []
             })
         );
+    }
+
+    fn placement(id: &str, x: f64, y: f64, width: f64, height: f64) -> ImagePlacement {
+        ImagePlacement {
+            id: id.into(),
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    #[test]
+    fn placed_image_is_described_and_drawn_under_strokes() {
+        let snapped = Snapshot {
+            revision: 4,
+            views: Vec::new(),
+            strokes: vec![stroke("a")],
+            // An image that completely covers the stroke (7..23, 7..13)
+            image: Some(placement("img", 5.0, 5.0, 30.0, 20.0)),
+        };
+        let result = canvas_result(&snapped, true, Some(&StoredImage::new(red_png()))).unwrap();
+        let json = summary_json(&result);
+        assert_eq!(
+            json["placedImage"],
+            serde_json::json!({ "id": "img", "bounds": { "x": 5, "y": 5, "width": 30, "height": 20 } })
+        );
+        // The image area is captured too
+        assert_eq!(json["image"]["x"], 5.0);
+        assert_eq!(json["image"]["width"], 30.0);
+        assert_eq!(result.content.len(), 2, "合成した PNG も返す");
+    }
+
+    /// Even if the image is placed larger than the paper, the captured area stays the paper (the handwriting does not shrink)
+    #[test]
+    fn image_beyond_the_page_does_not_grow_the_rendered_area() {
+        let snapped = Snapshot {
+            revision: 4,
+            views: vec![view(2, 30.0, 20.0)],
+            strokes: vec![stroke("a")],
+            // An image extending far beyond the right and bottom of the paper (30×20)
+            image: Some(placement("img", 10.0, 10.0, 4000.0, 3000.0)),
+        };
+        let result = canvas_result(&snapped, true, Some(&StoredImage::new(red_png()))).unwrap();
+        let json = summary_json(&result);
+        assert_eq!(
+            json["image"],
+            serde_json::json!({ "revision": 4, "x": 0.0, "y": 0.0, "width": 30.0, "height": 20.0, "scale": 1.0 })
+        );
+        // The area the image covers is returned as the placement itself
+        assert_eq!(
+            json["placedImage"],
+            serde_json::json!({ "id": "img", "bounds": { "x": 10, "y": 10, "width": 4000, "height": 3000 } })
+        );
+    }
+
+    /// When no page is connected the paper is unknown, so the whole image area is captured
+    #[test]
+    fn image_area_is_whole_without_any_page() {
+        let snapped = Snapshot {
+            revision: 4,
+            views: Vec::new(),
+            strokes: Vec::new(),
+            image: Some(placement("img", 10.0, 10.0, 4000.0, 3000.0)),
+        };
+        let json = summary_json(
+            &canvas_result(&snapped, true, Some(&StoredImage::new(red_png()))).unwrap(),
+        );
+        assert_eq!(json["image"]["x"], 10.0);
+        assert_eq!(json["image"]["width"], 4000.0);
+        assert!(
+            json["image"]["scale"].as_f64().unwrap() < 1.0,
+            "広い範囲は縮む"
+        );
+    }
+
+    #[test]
+    fn image_ops_are_summarized() {
+        let changes = ChangesSince::Ops {
+            revision: 4,
+            ops: vec![
+                CanvasOp::SetImage {
+                    image: placement("img", 1.0, 2.0, 10.5, 4.0),
+                },
+                CanvasOp::RemoveImage,
+            ],
+        };
+        let json = summary_json(&changes_result(&changes, &snapshot(), None).unwrap());
+        assert_eq!(
+            json["ops"][0],
+            serde_json::json!({
+                "type": "setImage",
+                "image": { "id": "img", "bounds": { "x": 1, "y": 2, "width": 11, "height": 4 } }
+            })
+        );
+        assert_eq!(json["ops"][1], serde_json::json!({ "type": "removeImage" }));
     }
 }

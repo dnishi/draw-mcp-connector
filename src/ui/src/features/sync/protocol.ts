@@ -11,7 +11,12 @@ export type CanvasOp =
   /** Removes strokes. Unknown IDs are ignored */
   | { type: 'remove'; ids: string[] }
   /** Replaces the stroke with the same ID, keeping its stacking order */
-  | { type: 'replace'; stroke: Stroke };
+  | { type: 'replace'; stroke: Stroke }
+  /** Places an image (also used to replace it with a new position or size). Replaces any existing image.
+The bytes are sent on a separate stream (ImageStream) */
+  | { type: 'setImage'; image: ImagePlacement }
+  /** Removes the image. Ignored if there is no image */
+  | { type: 'removeImage' };
 
 /** Canvas page → bridge. One JSON object per line */
 export type ClientMessage =
@@ -20,6 +25,25 @@ export type ClientMessage =
   /** The visible area or paper size changed (screen size, zoom, pan) */
   | { type: 'resize'; viewport: Viewport; page?: PageSize | null }
   | { type: 'op'; op: CanvasOp };
+
+/** Position and size of an image (canvas coordinates, CSS pixels). Images are placed under all strokes.
+Only one per canvas for now (referenced by ID, anticipating several in the future) */
+export interface ImagePlacement {
+  /** ID unique across the canvas. Shared with the bytes, which are sent on a separate stream (ImageStream) */
+  id: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** Header on the first line of a separate stream that carries image bytes (opened one-to-one, apart from the bidirectional stream).
+provide is followed by the PNG bytes; request has nothing after it. Either the page or the bridge can open one */
+export type ImageStream =
+  /** Sends the bytes of the image with the given ID */
+  | { type: 'provide'; id: string }
+  /** The bytes of the image with the given ID are requested. Not sent if it does not have them */
+  | { type: 'request'; id: string };
 
 /** Size of the canvas (paper) in CSS pixels. The paper starts at (0, 0) and matches the canvas area on the page (what is visible at 100%) */
 export interface PageSize {
@@ -38,9 +62,11 @@ Sending the last received key with hello reconnects without waiting for approval
   | { type: 'resumeKey'; key: string }
   /** Another connection reconnected with the key handed to this connection. The connection is closed after this */
   | { type: 'superseded' }
-  /** Approved. The whole canvas held by the bridge. The page adopts it,
-keeps strokes only it has (such as ones written before the bridge restarted), and sends them back with insert */
-  | { type: 'snapshot'; strokes: Stroke[] }
+  /** Approved. The whole canvas the bridge has. The page matches it,
+keeps strokes only it has (such as ones written before the bridge restarted), and sends them back with insert.
+The bridge's image wins, but an image the page has and the bridge does not is sent back with setImage.
+If the page does not have the bytes of the bridge's image, it receives them with an ImageStream request */
+  | { type: 'snapshot'; strokes: Stroke[]; image?: ImagePlacement | null }
   | { type: 'op'; op: CanvasOp };
 
 export interface Stroke {

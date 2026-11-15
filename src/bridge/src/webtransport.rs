@@ -4,10 +4,11 @@
 //! It first sends the token in hello, and syncing starts after approval on the PC.
 //! An approved connection gets a resume key (resume.rs) and can reconnect with it without approval for a while after disconnecting.
 
+use std::collections::HashSet;
 use std::io;
 use std::net::IpAddr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::de::DeserializeOwned;
@@ -23,14 +24,18 @@ use wtransport::{
 use crate::app::{App, BoxError};
 use crate::canvas::{CanvasView, Origin};
 use crate::link_status::LinkStatus;
+use crate::lock::lock;
 use crate::net;
 use crate::pairing::Endpoint;
-use crate::protocol::{ClientMessage, ServerMessage};
+use crate::protocol::{CanvasOp, ClientMessage, ImageStream, ServerMessage};
+use crate::render::StoredImage;
 use crate::resume::Lease;
 use crate::{config, ui};
 
 /// Maximum size of one message. Fits long strokes and rejects malicious huge lines
 const MAX_MESSAGE_BYTES: u64 = 4 * 1024 * 1024;
+/// Upper limit of image byte size. The page shrinks the longer side to 2000px into a PNG, so that fits
+const MAX_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
 
 pub async fn run(app: Arc<App>) -> Result<(), BoxError> {
     let server = start(&app)?;
@@ -55,7 +60,7 @@ async fn accept_sessions(app: Arc<App>, server: Arc<WtEndpoint<Server>>) -> Resu
         let id = next_id.fetch_add(1, Ordering::Relaxed);
         let app = app.clone();
         tokio::spawn(async move {
-            if let Err(error) = handle_session(&app, incoming, id).await {
+            if let Err(error) = handle_session(app, incoming, id).await {
                 warn!("接続 {id} が終了: {error}");
             }
         });
@@ -116,6 +121,17 @@ struct Messages {
     line: Vec<u8>,
 }
 
+/// Turns the whole canvas (snapshot) into the form sent to pages. Only strokes and the image are sent to pages;
+/// the revision number and per-page views (for the AI) are not included
+impl From<crate::canvas::Snapshot> for ServerMessage {
+    fn from(snapshot: crate::canvas::Snapshot) -> Self {
+        Self::Snapshot {
+            strokes: snapshot.strokes,
+            image: snapshot.image,
+        }
+    }
+}
+
 impl Messages {
     /// Reads the next line. None when the peer closes the stream
     async fn read<T: DeserializeOwned>(&mut self) -> Result<Option<T>, BoxError> {
@@ -150,7 +166,7 @@ impl Messages {
     }
 }
 
-async fn handle_session(app: &App, incoming: IncomingSession, id: u64) -> Result<(), BoxError> {
+async fn handle_session(app: Arc<App>, incoming: IncomingSession, id: u64) -> Result<(), BoxError> {
     let connection = incoming.await?.accept().await?;
     let remote = connection.remote_address();
     let (writer, reader) = connection.accept_bi().await?;
@@ -180,7 +196,7 @@ async fn handle_session(app: &App, incoming: IncomingSession, id: u64) -> Result
     let ip = remote.ip().to_canonical();
     if resume.is_some_and(|key| app.resume_keys.redeem(&key)) {
         info!("{ip} が再接続用の鍵で繋ぎ直した。許可を求めずに受ける");
-    } else if !approve(app, &connection, &mut messages, ip, id).await? {
+    } else if !approve(&app, &connection, &mut messages, ip, id).await? {
         return Ok(());
     }
 
@@ -197,7 +213,15 @@ async fn handle_session(app: &App, incoming: IncomingSession, id: u64) -> Result
         page,
         viewport,
     });
-    let result = sync(app, &mut messages, id, ip, &mut resume_key).await;
+    let result = sync(
+        app.clone(),
+        &connection,
+        &mut messages,
+        id,
+        ip,
+        &mut resume_key,
+    )
+    .await;
     app.canvas.remove_view(id);
     app.status.remove(id);
     result
@@ -234,17 +258,28 @@ async fn approve(
     Ok(allowed)
 }
 
-/// Streams canvas changes both ways on an approved connection. Also keeps replacing the resume key
+/// Streams canvas changes both ways over an approved connection, also replacing the reconnect key.
+/// Image bytes are exchanged on separate (unidirectional) streams
 async fn sync(
-    app: &App,
+    app: Arc<App>,
+    connection: &Connection,
     messages: &mut Messages,
     id: u64,
     ip: IpAddr,
     resume_key: &mut Lease<'_>,
 ) -> Result<(), BoxError> {
     let origin = Origin::Connection(id);
-    let (strokes, mut changes) = app.canvas.subscribe();
-    messages.write(&ServerMessage::Snapshot { strokes }).await?;
+    // Receiving and sending image streams are each handled in a separate task (so that large image transfers
+    // do not stop the sync loop and a failure does not close the connection). Finished tasks are taken out in select
+    // and panics are logged (otherwise tasks keep piling up while the connection lasts).
+    // Leaving the loop drops the JoinSet, which stops any remaining tasks
+    let mut image_streams = tokio::task::JoinSet::new();
+    // IDs of images that were requested but have not arrived yet. Sent to this connection when the contents arrive
+    // (the same connection that sent a Request for contents to its page may receive a Request from another page)
+    let wanted: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+    let mut images_ready = app.canvas.subscribe_images();
+    let (state, mut changes) = app.canvas.subscribe();
+    messages.write(&state.into()).await?;
     let rotation_start = tokio::time::Instant::now() + config::RESUME_KEY_LIFETIME;
     let mut rotation = tokio::time::interval_at(rotation_start, config::RESUME_KEY_LIFETIME);
 
@@ -263,39 +298,237 @@ async fn sync(
             message = messages.read::<ClientMessage>() => match message? {
                 None => return Ok(()),
                 Some(ClientMessage::Op { op }) => {
+                    // An image's contents arrive only once, when imported. For an image it does not have
+                    // (e.g. one brought back by undo after the oldest were dropped), ask the page that placed it
+                    let missing = match &op {
+                        CanvasOp::SetImage { image } if app.canvas.image_data(&image.id).is_none() => {
+                            Some(image.id.clone())
+                        }
+                        _ => None,
+                    };
                     app.canvas.apply(origin, op);
+                    if let Some(missing) = missing {
+                        spawn_image_send(
+                            &mut image_streams,
+                            id,
+                            connection.clone(),
+                            ImageStream::Request { id: missing },
+                            None,
+                        );
+                    }
                 }
                 Some(ClientMessage::Resize { viewport, page }) => {
                     app.canvas.set_view(CanvasView { id, ip, page, viewport });
                 }
                 Some(ClientMessage::Hello { .. }) => {}
             },
-            change = changes.recv() => match change {
-                Ok(change) if change.origin != origin => {
-                    messages.write(&ServerMessage::Op { op: change.op }).await?;
+            stream = connection.accept_uni() => {
+                // Comes over the same connection as the pen strokes, so only an approved peer can use it
+                match stream {
+                    Ok(stream) => {
+                        let app = Arc::clone(&app);
+                        let connection = connection.clone();
+                        let wanted = Arc::clone(&wanted);
+                        image_streams.spawn(async move {
+                            // An image failure does not close the connection (stroke sync can continue)
+                            if let Err(error) = handle_image_stream(&app, &connection, &wanted, stream).await {
+                                warn!("接続 {id} の画像ストリームが失敗: {error}");
+                            }
+                        });
+                    }
+                    // A failure of accept_uni itself is treated as the connection being closed
+                    Err(error) => return Err(error.into()),
                 }
-                Ok(_) => {}
-                // If too many changes were missed, resend the whole canvas
+            }
+            change = changes.recv() => match change {
+                Ok(change) => {
+                    // If the placement is removed or replaced by another image, the remembered contents become meaningless
+                    match &change.op {
+                        CanvasOp::SetImage { image } => lock(&wanted).retain(|id| id == &image.id),
+                        CanvasOp::RemoveImage => lock(&wanted).clear(),
+                        _ => {}
+                    }
+                    if change.origin != origin {
+                        messages.write(&ServerMessage::Op { op: change.op }).await?;
+                    }
+                }
+                // When too many changes were missed, send the whole canvas again
                 Err(RecvError::Lagged(_)) => {
-                    let (strokes, receiver) = app.canvas.subscribe();
+                    let (state, receiver) = app.canvas.subscribe();
                     changes = receiver;
-                    messages.write(&ServerMessage::Snapshot { strokes }).await?;
+                    messages.write(&state.into()).await?;
                 }
                 Err(RecvError::Closed) => {
                     return Err(io::Error::other("キャンバスが閉じた").into());
                 }
             },
+            ready = images_ready.recv() => match ready {
+                Ok(ready) => {
+                    // Send only the IDs it remembers (other connections may receive the same notice)
+                    if lock(&wanted).remove(&ready)
+                        && let Some(image) = app.canvas.image_data(&ready)
+                    {
+                        spawn_image_send(
+                            &mut image_streams,
+                            id,
+                            connection.clone(),
+                            ImageStream::Provide { id: ready },
+                            Some(image),
+                        );
+                    }
+                }
+                // If notices were missed, recount the remembered ones (send those that have arrived)
+                Err(RecvError::Lagged(_)) => {
+                    let remembered: Vec<String> = lock(&wanted).drain().collect();
+                    for remembered in remembered {
+                        match app.canvas.image_data(&remembered) {
+                            Some(image) => spawn_image_send(
+                                &mut image_streams,
+                                id,
+                                connection.clone(),
+                                ImageStream::Provide { id: remembered },
+                                Some(image),
+                            ),
+                            None => {
+                                lock(&wanted).insert(remembered);
+                            }
+                        }
+                    }
+                }
+                // The notice sender exists as long as the app is alive, so it never closes
+                Err(RecvError::Closed) => {}
+            },
+            // Take out finished image tasks (otherwise they keep piling up while the connection lasts).
+            // Send/receive failures are logged as warn inside the task. Panics are only logged here and the connection is kept
+            Some(finished) = image_streams.join_next(), if !image_streams.is_empty() => {
+                if let Err(error) = finished {
+                    warn!("接続 {id} の画像のタスクが終了: {error}");
+                }
+            }
         }
     }
+}
+
+/// Handles a stream of image bytes. The first line is the header (ImageStream); for provide the PNG follows.
+/// If the contents of a requested image have not arrived yet, remembers it in `wanted`,
+/// and the sync loop sends it to this connection when the contents arrive
+async fn handle_image_stream(
+    app: &App,
+    connection: &Connection,
+    wanted: &Mutex<HashSet<String>>,
+    stream: RecvStream,
+) -> Result<(), BoxError> {
+    let mut reader = BufReader::new(stream);
+    let mut line = Vec::new();
+    let read = (&mut reader)
+        .take(MAX_MESSAGE_BYTES)
+        .read_until(b'\n', &mut line)
+        .await?;
+    if read == 0 || line.last() != Some(&b'\n') {
+        return Err("画像のストリームのヘッダーが不正".into());
+    }
+    match serde_json::from_slice::<ImageStream>(&line)? {
+        ImageStream::Provide { id } => {
+            let mut bytes = Vec::new();
+            // Read one more byte; if it exceeds the limit, notice before it gets truncated
+            let count = match reader
+                .take(MAX_IMAGE_BYTES + 1)
+                .read_to_end(&mut bytes)
+                .await
+            {
+                Ok(count) => count,
+                Err(error) => {
+                    // The contents were cut off midway. The page ignores Requests while it is still sending,
+                    // so if the image is placed and has no contents, ask this connection again to make it resend
+                    if app.canvas.image().is_some_and(|image| image.id == id)
+                        && app.canvas.image_data(&id).is_none()
+                        && let Err(send_error) =
+                            send_image_stream(connection, &ImageStream::Request { id }, None).await
+                    {
+                        warn!("中身が途中で切れた画像を求め直せなかった: {send_error}");
+                    }
+                    return Err(error.into());
+                }
+            };
+            if count as u64 > MAX_IMAGE_BYTES {
+                return Err(format!("画像が大きすぎる: {count} バイト").into());
+            }
+            app.canvas.put_image_data(&id, bytes);
+        }
+        ImageStream::Request { id } => {
+            if let Some(image) = app.canvas.image_data(&id) {
+                send_image_stream(
+                    connection,
+                    &ImageStream::Provide { id },
+                    Some(image.bytes()),
+                )
+                .await?;
+                return Ok(());
+            }
+            // No contents yet. If it is the placed image (the requesting page should be showing it),
+            // remember it until the arrival notice. There is no point remembering one that is not placed
+            if app.canvas.image().is_some_and(|image| image.id == id) {
+                lock(wanted).insert(id.clone());
+                // If it arrived right after being remembered, send it without waiting for the notice (in case the notice was missed)
+                if let Some(image) = app.canvas.image_data(&id)
+                    && lock(wanted).remove(&id)
+                {
+                    send_image_stream(
+                        connection,
+                        &ImageStream::Provide { id },
+                        Some(image.bytes()),
+                    )
+                    .await?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Opens a unidirectional stream, writes the header on the first line and the bytes after it if there is a body, then closes it
+async fn send_image_stream(
+    connection: &Connection,
+    header: &ImageStream,
+    body: Option<&[u8]>,
+) -> Result<(), BoxError> {
+    let mut sender = connection.open_uni().await?.await?;
+    let mut line = serde_json::to_vec(header)?;
+    line.push(b'\n');
+    sender.write_all(&line).await?;
+    if let Some(body) = body {
+        sender.write_all(body).await?;
+    }
+    sender.finish().await?;
+    Ok(())
+}
+
+/// Sends image bytes in a separate task. Does not stop the sync loop and does not close the connection on failure
+/// (the order of sending is not guaranteed; the receiver treats each stream as self-contained)
+fn spawn_image_send(
+    image_streams: &mut tokio::task::JoinSet<()>,
+    id: u64,
+    connection: Connection,
+    header: ImageStream,
+    body: Option<Arc<StoredImage>>,
+) {
+    image_streams.spawn(async move {
+        let body = body.as_deref().map(StoredImage::bytes);
+        if let Err(error) = send_image_stream(&connection, &header, body).await {
+            warn!("接続 {id} への画像ストリームの送信が失敗: {error}");
+        }
+    });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{Author, CanvasOp, PageSize, Stroke, StrokePoint, Viewport};
+    use crate::protocol::{
+        Author, CanvasOp, ImagePlacement, PageSize, Stroke, StrokePoint, Viewport,
+    };
     use std::net::Ipv4Addr;
     use std::sync::atomic::AtomicUsize;
-    use wtransport::ClientConfig;
+    use wtransport::{ClientConfig, VarInt};
 
     fn stroke(id: &str) -> Stroke {
         Stroke {
@@ -356,6 +589,17 @@ mod tests {
     }
 
     /// Connects with the connection info from the QR code URL and sends hello
+    /// Waits until the condition holds (fails after 5 seconds)
+    async fn wait_until(condition: impl Fn() -> bool) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !condition() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("条件が満たされない");
+    }
+
     async fn connect(app: &App, resume: Option<String>) -> (Client, Connection) {
         let url = app.pairing.canvas_url().unwrap();
         let params: std::collections::HashMap<_, _> =
@@ -398,8 +642,23 @@ mod tests {
         }
     }
 
+    /// Sends a Provide header and part of the contents on a unidirectional stream, then cuts it off (reset).
+    /// RESET_STREAM discards data not yet delivered, so after sending the header,
+    /// it waits for the server to read it before starting to write the contents and cutting them off
+    async fn send_truncated_provide(connection: &Connection, id: &str) {
+        let mut stream = connection.open_uni().await.unwrap().await.unwrap();
+        let header = serde_json::to_vec(&ImageStream::Provide { id: id.to_string() }).unwrap();
+        stream.write_all(&header).await.unwrap();
+        stream.write_all(b"\n").await.unwrap();
+        // Wait for the header to reach the peer
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        stream.write_all(&b"half"[..]).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        stream.reset(VarInt::from_u32(1)).unwrap();
+    }
+
     /// Actually connects over WebTransport and checks hello → approval → bidirectional sync.
-    /// Then reconnects with the resume key (the port is fixed, so the tests that start a server are combined into one)
+    /// Then reconnects with the reconnect key (the port is fixed, so tests that start a server are kept in one)
     #[tokio::test]
     async fn syncs_after_approval_and_resumes() {
         let (app, asked) = serve();
@@ -415,7 +674,10 @@ mod tests {
         let key = receive_resume_key(&mut client).await;
         assert_eq!(
             client.receive().await,
-            ServerMessage::Snapshot { strokes: vec![] }
+            ServerMessage::Snapshot {
+                strokes: vec![],
+                image: None
+            }
         );
 
         let op = CanvasOp::Insert {
@@ -442,8 +704,228 @@ mod tests {
             (Ipv4Addr::LOCALHOST.into(), VIEWPORT, PAGE)
         );
 
-        // Reconnecting with the key returns to syncing without asking for approval.
-        // If the old connection the key was handed to is still alive, it is told and closed
+        // Images: the bytes arrive on a separate (unidirectional) stream and the placement in an op
+        let placement = ImagePlacement {
+            id: "img1".into(),
+            x: 1.0,
+            y: 2.0,
+            width: 30.0,
+            height: 20.0,
+        };
+        let mut provide = connection.open_uni().await.unwrap().await.unwrap();
+        provide
+            .write_all(&serde_json::to_vec(&ImageStream::Provide { id: "img1".into() }).unwrap())
+            .await
+            .unwrap();
+        provide.write_all(b"\n").await.unwrap();
+        provide.write_all(b"fake-png").await.unwrap();
+        provide.finish().await.unwrap();
+        // The order between streams is not fixed, so send the placement after the bytes arrive
+        // (if the placement arrives first, the bridge requests the bytes, which gets mixed up with the reply to the request below)
+        wait_until(|| app.canvas.image_data("img1").is_some()).await;
+        client
+            .send(&ClientMessage::Op {
+                op: CanvasOp::SetImage {
+                    image: placement.clone(),
+                },
+            })
+            .await;
+        wait_until(|| app.canvas.snapshot().image.is_some()).await;
+        assert_eq!(
+            app.canvas
+                .image_data("img1")
+                .as_deref()
+                .map(StoredImage::bytes),
+            Some(&b"fake-png"[..])
+        );
+        assert_eq!(app.canvas.snapshot().image, Some(placement.clone()));
+
+        // A request from a page that does not have the bytes: the bridge sends them back on a unidirectional stream
+        let mut request = connection.open_uni().await.unwrap().await.unwrap();
+        request
+            .write_all(&serde_json::to_vec(&ImageStream::Request { id: "img1".into() }).unwrap())
+            .await
+            .unwrap();
+        request.write_all(b"\n").await.unwrap();
+        request.finish().await.unwrap();
+        let mut reply = tokio::time::timeout(Duration::from_secs(5), connection.accept_uni())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut received = Vec::new();
+        reply.read_to_end(&mut received).await.unwrap();
+        let split = received
+            .iter()
+            .position(|&byte| byte == b'\n')
+            .expect("ヘッダー行の後にバイト列");
+        let (header, body) = received.split_at(split + 1);
+        assert_eq!(
+            serde_json::from_slice::<ImageStream>(header).unwrap(),
+            ImageStream::Provide { id: "img1".into() }
+        );
+        assert_eq!(body, b"fake-png");
+
+        // When a placement arrives for an image the bridge does not have, it asks the placing page for the bytes
+        client
+            .send(&ClientMessage::Op {
+                op: CanvasOp::SetImage {
+                    image: ImagePlacement {
+                        id: "img2".into(),
+                        ..placement.clone()
+                    },
+                },
+            })
+            .await;
+        let mut wanted = tokio::time::timeout(Duration::from_secs(5), connection.accept_uni())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut received = Vec::new();
+        wanted.read_to_end(&mut received).await.unwrap();
+        assert_eq!(
+            serde_json::from_slice::<ImageStream>(&received).unwrap(),
+            ImageStream::Request { id: "img2".into() }
+        );
+
+        // Several image streams with an invalid header: only logged; the connection is kept and stroke sync continues
+        // (one that is not JSON, one that is JSON but not an ImageStream, one that does not end with a newline)
+        for header in ["not a header\n", "null\n", "{ truncated"] {
+            let mut broken = connection.open_uni().await.unwrap().await.unwrap();
+            broken.write_all(header.as_bytes()).await.unwrap();
+            broken.finish().await.unwrap();
+        }
+        let keep = CanvasOp::Insert {
+            stroke: stroke("keep-going"),
+            index: 0,
+        };
+        assert!(app.canvas.apply(Origin::Ai, keep.clone()).is_some());
+        let message = tokio::time::timeout(Duration::from_secs(5), client.receive())
+            .await
+            .expect("画像ストリームの失敗で接続が切れない");
+        assert_eq!(message, ServerMessage::Op { op: keep });
+
+        // An image requested before its contents: place it (after receiving the Request the bridge sends back),
+        // and once the contents arrive they are sent to the requesting connection
+        client
+            .send(&ClientMessage::Op {
+                op: CanvasOp::SetImage {
+                    image: ImagePlacement {
+                        id: "img3".into(),
+                        ..placement.clone()
+                    },
+                },
+            })
+            .await;
+        wait_until(|| {
+            app.canvas
+                .snapshot()
+                .image
+                .as_ref()
+                .is_some_and(|image| image.id == "img3")
+        })
+        .await;
+        // The bridge that received the placement asks for the contents (the page discards it as something it cannot send)
+        let mut asked_back = tokio::time::timeout(Duration::from_secs(5), connection.accept_uni())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut received = Vec::new();
+        asked_back.read_to_end(&mut received).await.unwrap();
+        assert_eq!(
+            serde_json::from_slice::<ImageStream>(&received).unwrap(),
+            ImageStream::Request { id: "img3".into() }
+        );
+        // Another page asks for the contents (not there yet)
+        let mut request = connection.open_uni().await.unwrap().await.unwrap();
+        request
+            .write_all(&serde_json::to_vec(&ImageStream::Request { id: "img3".into() }).unwrap())
+            .await
+            .unwrap();
+        request.write_all(b"\n").await.unwrap();
+        request.finish().await.unwrap();
+        // Then the contents arrive
+        let mut provide = connection.open_uni().await.unwrap().await.unwrap();
+        provide
+            .write_all(&serde_json::to_vec(&ImageStream::Provide { id: "img3".into() }).unwrap())
+            .await
+            .unwrap();
+        provide.write_all(b"\n").await.unwrap();
+        provide.write_all(b"late-png").await.unwrap();
+        provide.finish().await.unwrap();
+        // The contents are sent back to the requesting connection
+        let mut reply = tokio::time::timeout(Duration::from_secs(5), connection.accept_uni())
+            .await
+            .expect("中身が届いたら、求めていた接続へ送られる")
+            .unwrap();
+        let mut received = Vec::new();
+        reply.read_to_end(&mut received).await.unwrap();
+        let split = received
+            .iter()
+            .position(|&byte| byte == b'\n')
+            .expect("ヘッダー行の後にバイト列");
+        let (header, body) = received.split_at(split + 1);
+        assert_eq!(
+            serde_json::from_slice::<ImageStream>(header).unwrap(),
+            ImageStream::Provide { id: "img3".into() }
+        );
+        assert_eq!(body, b"late-png");
+
+        // A stream whose contents were cut off midway: for a placed image without contents, ask this connection again
+        // (the page ignores Requests while still sending, so it would not be resent unless asked again)
+        client
+            .send(&ClientMessage::Op {
+                op: CanvasOp::SetImage {
+                    image: ImagePlacement {
+                        id: "img4".into(),
+                        ..placement.clone()
+                    },
+                },
+            })
+            .await;
+        wait_until(|| {
+            app.canvas
+                .snapshot()
+                .image
+                .as_ref()
+                .is_some_and(|image| image.id == "img4")
+        })
+        .await;
+        // The request the bridge sent on receiving the placement (this test page does not have the contents)
+        let mut asked_back = tokio::time::timeout(Duration::from_secs(5), connection.accept_uni())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut received = Vec::new();
+        asked_back.read_to_end(&mut received).await.unwrap();
+        assert_eq!(
+            serde_json::from_slice::<ImageStream>(&received).unwrap(),
+            ImageStream::Request { id: "img4".into() }
+        );
+        // Start sending the contents and cut them off midway
+        send_truncated_provide(&connection, "img4").await;
+        // After the cut-off, it asks this connection again
+        let mut asked_again = tokio::time::timeout(Duration::from_secs(5), connection.accept_uni())
+            .await
+            .expect("中身が切れたら求め直す")
+            .unwrap();
+        let mut received = Vec::new();
+        asked_again.read_to_end(&mut received).await.unwrap();
+        assert_eq!(
+            serde_json::from_slice::<ImageStream>(&received).unwrap(),
+            ImageStream::Request { id: "img4".into() }
+        );
+
+        // When the contents of an image that is not placed are cut off, it does not ask again
+        send_truncated_provide(&connection, "img5").await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), connection.accept_uni())
+                .await
+                .is_err(),
+            "置かれていない画像は求め直さない"
+        );
+
+        // Reconnecting with the key returns to sync without asking for approval.
+        // If the old connection that received the key is still open, notify it and close it
         let (mut resumed, _resumed_connection) = connect(&app, Some(key.clone())).await;
         let next_key = receive_resume_key(&mut resumed).await;
         assert_ne!(next_key, key, "繋ぎ直すたびに新しい鍵を渡す");

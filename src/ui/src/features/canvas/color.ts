@@ -23,7 +23,9 @@ export function strokeColor(stroke: Pick<Stroke, 'color'>): string {
 
 /** Converts "#rrggbb" to [r, g, b] in 0 to 1. Black if the format is wrong */
 export function toRgb(hex: string): [number, number, number] {
-  if (!isHexColor(hex)) return [0, 0, 0];
+  if (!isHexColor(hex)) {
+    return [0, 0, 0];
+  }
   const channel = (i: number) => parseInt(hex.slice(i, i + 2), 16) / 255;
   return [channel(1), channel(3), channel(5)];
 }
