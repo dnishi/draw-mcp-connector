@@ -9,13 +9,16 @@ import {
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CanvasPage } from './CanvasPage';
+import { UNSUPPORTED_BROWSER_MESSAGE } from './StrokeRenderer';
 
 describe('CanvasPage', () => {
   // jsdom has no navigator.gpu, so it behaves like a browser without WebGPU
-  it('WebGPU を使えないときは理由を表示する', async () => {
+  it('WebGPU を使えないときは、使えるブラウザと版を表示する', async () => {
     render(<CanvasPage />);
 
-    expect(await screen.findByRole('alert')).toHaveTextContent('WebGPU');
+    expect((await screen.findByRole('alert')).textContent).toBe(
+      UNSUPPORTED_BROWSER_MESSAGE,
+    );
   });
 
   it('右のサイドバーに、ツールと接続の状態をまとめる', () => {

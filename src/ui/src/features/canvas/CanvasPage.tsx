@@ -270,7 +270,11 @@ export function CanvasPage({ connectionInfo = null }: CanvasPageProps) {
             role="alert"
             className="absolute inset-x-4 bottom-4 rounded-lg border bg-background p-3 text-center text-sm text-destructive"
           >
-            {notice}
+            {/* Center the block of text and left-align its lines (so the list of supported browsers lines up).
+                whitespace-pre-line: show multi-line messages with their line breaks */}
+            <span className="inline-block text-left whitespace-pre-line">
+              {notice}
+            </span>
           </p>
         )}
       </div>

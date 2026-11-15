@@ -168,16 +168,28 @@ fn fsGrid(@builtin(position) position: vec4f) -> @location(0) vec4f {
 }
 `;
 
+/**
+ * Message shown in browsers that can't use WebGPU. It avoids technical terms and lists only supported browsers and versions.
+ * Each version is the first one with both WebGPU and WebTransport serverCertificateHashes
+ * (MDN browser-compat-data, api/GPU.json and api/WebTransport.json, as of 2026-11-15).
+ * Firefox isn't listed: its WebGPU support is partial and depends on the OS, and it hasn't been tested
+ */
+export const UNSUPPORTED_BROWSER_MESSAGE = [
+  "This browser isn't supported. Please use one of these:",
+  '- Safari 26.4 or later (iPad, iPhone, Mac)',
+  '- Chrome or Edge 113 or later (Windows, Mac)',
+  '- Chrome 121 or later (Android)',
+].join('\n');
+
 export async function requestGpuDevice(): Promise<GPUDevice> {
   // navigator.gpu exists only on HTTPS (or localhost) pages
   if (!navigator.gpu) {
-    throw new Error(
-      "WebGPU isn't available. Open this page over HTTPS in a browser that supports WebGPU.",
-    );
+    throw new Error(UNSUPPORTED_BROWSER_MESSAGE);
   }
+  // Not available where the GPU can't be used (e.g. when disabled, or for search engine crawlers)
   const adapter = await navigator.gpu.requestAdapter();
   if (!adapter) {
-    throw new Error("Couldn't get a WebGPU adapter.");
+    throw new Error(UNSUPPORTED_BROWSER_MESSAGE);
   }
   const device = await adapter.requestDevice();
   // Validation errors (such as binding mismatches, where commands are discarded) appear in the console
