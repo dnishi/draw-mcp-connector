@@ -4,6 +4,7 @@
 // About in the menu (only on OSes with a tray)
 #[cfg(any(test, target_os = "macos", target_os = "windows"))]
 mod about;
+mod ai_inbox;
 mod app;
 #[cfg(test)]
 mod app_icon;

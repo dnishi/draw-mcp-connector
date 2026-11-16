@@ -54,6 +54,13 @@ export function useBridgeSync({
     info ? 'connecting' : 'disconnected',
   );
   const [message, setMessage] = useState<string | null>(null);
+  // Whether the AI is waiting (waiting) and whether a Send to AI press has not been picked up yet (queued).
+  // null means "no AiStatus received from the bridge yet". An old bridge (which does not know this message)
+  // cannot parse a sendToAi it receives and drops the connection, so nothing is sent until one is received
+  const [aiStatus, setAiStatus] = useState<{
+    waiting: boolean;
+    queued: boolean;
+  } | null>(null);
   // Another page reconnected with this page's key and this connection was closed (tell the user)
   const [superseded, setSuperseded] = useState(false);
   // Incrementing it reconnects (when the user chooses to after a disconnect)
@@ -82,6 +89,7 @@ export function useBridgeSync({
       syncingRef.current = null;
       setStatus('disconnected');
       setMessage(text);
+      setAiStatus(null);
     };
 
     const onMessage = (received: ServerMessage) => {
@@ -109,6 +117,9 @@ export function useBridgeSync({
           if (received.image && !images.has(received.image.id)) {
             connection?.requestImageBytes(received.image.id);
           }
+          return;
+        case 'aiStatus':
+          setAiStatus({ waiting: received.waiting, queued: received.queued });
           return;
         case 'op':
           applyRemote({ type: 'remote', op: received.op });
@@ -189,9 +200,18 @@ export function useBridgeSync({
     setStatus('connecting');
     setMessage(null);
     setSuperseded(false);
+    setAiStatus(null);
     setAttempt((count) => count + 1);
   }, []);
   const dismissSuperseded = useCallback(() => setSuperseded(false), []);
+  // Tells the AI that the user finished writing. Not sent until an AiStatus has been received from the bridge
+  // (until then, the bridge may not be one that can parse sendToAi)
+  const sendToAi =
+    status === 'connected' && aiStatus !== null
+      ? () => {
+          syncingRef.current?.send({ type: 'sendToAi' });
+        }
+      : null;
 
   // For the first setImage of an image, send the bytes on a separate stream first (so that the bridge can draw
   // the image when the op arrives). For images already sent, moves and resizes send only the placement
@@ -227,5 +247,8 @@ export function useBridgeSync({
     reconnect: canReconnect ? reconnect : null,
     superseded,
     dismissSuperseded,
+    aiWaiting: status === 'connected' && aiStatus?.waiting === true,
+    sendQueued: status === 'connected' && aiStatus?.queued === true,
+    sendToAi,
   };
 }

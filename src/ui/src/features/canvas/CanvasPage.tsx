@@ -5,6 +5,7 @@ import { useBridgeSync } from '../sync/useBridgeSync';
 import { CameraDialog } from './CameraDialog';
 import { useCameraAvailable } from './camera';
 import { ConnectionStatusBadge } from './ConnectionStatusBadge';
+import { SendToAiButton } from './SendToAiButton';
 import { SupersededDialog } from './SupersededDialog';
 import { BLACK } from './color';
 import { useCustomColor } from './customColor';
@@ -87,15 +88,23 @@ export function CanvasPage({ connectionInfo = null }: CanvasPageProps) {
       onGestureStart: () => setImageSettingsAt(null),
     },
   );
-  const { status, message, reconnect, superseded, dismissSuperseded } =
-    useBridgeSync({
-      info: connectionInfo,
-      viewport,
-      page,
-      outgoing,
-      applyRemote,
-      images,
-    });
+  const {
+    status,
+    message,
+    reconnect,
+    superseded,
+    dismissSuperseded,
+    aiWaiting,
+    sendQueued,
+    sendToAi,
+  } = useBridgeSync({
+    info: connectionInfo,
+    viewport,
+    page,
+    outgoing,
+    applyRemote,
+    images,
+  });
   const notice = error ?? importError ?? message;
 
   /** Changes the tool (Toolbar's onToolChange) */
@@ -279,12 +288,17 @@ export function CanvasPage({ connectionInfo = null }: CanvasPageProps) {
         )}
       </div>
 
-      {/* Connection status at the top, tools below it. When the screen is short, only the sidebar scrolls */}
+      {/* Connection status at the top, Send to AI below it, then the tools. When the screen is short, only the sidebar scrolls */}
       <aside
         aria-label="Sidebar"
         className="flex w-18 shrink-0 flex-col items-center gap-2 overflow-y-auto overscroll-contain border-l bg-background p-2"
       >
-        <ConnectionStatusBadge status={status} onReconnect={reconnect} />
+        <ConnectionStatusBadge
+          status={status}
+          onReconnect={reconnect}
+          aiWaiting={aiWaiting}
+        />
+        <SendToAiButton onSend={sendToAi} queued={sendQueued} />
         {/* Separates the status icon from the tool buttons so they can be told apart */}
         <Separator />
         <Toolbar

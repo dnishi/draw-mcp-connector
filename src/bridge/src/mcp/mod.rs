@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use tracing::info;
 
 use crate::app::{App, BoxError};
-use crate::canvas::{Origin, Snapshot};
+use crate::canvas::{ChangesSince, Origin, Snapshot};
 use crate::color;
 use crate::config;
 use crate::net;
@@ -43,6 +43,7 @@ const INSTRUCTIONS: &str = "\
 - 線の色は color で、#rrggbb の形(例: #ff3b30)。省略すると黒
 - 筆跡は strokes の後ろほど上に重なる
 - 変更を追うときは read_canvas の revision を覚えておき、read_canvas_changes に渡す。ops が空なら変更は無く、画像も付かない
+- 利用者がキャンバスで書き終えるのを待つときは wait_for_canvas を呼ぶ(利用者はキャンバスの Send to AI を押して知らせる)。sent が false なら約 50 秒たっただけなので、すぐにもう一度呼ぶ。sent が true なら、返った変更と画像を読んで指示に取りかかる。返った revision を次の since_revision に使う
 - AI が消したり直したりできるのは、AI が書いた筆跡(author が ai)だけ
 - キャンバスが繋がっていなければ(canvases が空なら) connect_canvas で接続する";
 
@@ -229,6 +230,19 @@ impl CanvasServer {
             .and_then(|image| self.app.canvas.image_data(&image.id))
     }
 
+    /// Gets the changes since since_revision, the current snapshot, and the image data.
+    /// The snapshot is taken after the diff, so the image is the same revision as the diff or newer
+    /// (see image.revision)
+    fn changes_data(
+        &self,
+        since_revision: u64,
+    ) -> (ChangesSince, Snapshot, Option<std::sync::Arc<StoredImage>>) {
+        let changes = self.app.canvas.changes_since(since_revision);
+        let current = self.app.canvas.snapshot();
+        let data = self.placed_image_data(&current);
+        (changes, current, data)
+    }
+
     #[tool(
         description = "キャンバス全体を読む。画像(PNG。利用者が置いた画像があれば筆跡の下に合成する)と、revision・繋がっているページごとの紙の大きさと見えている範囲 canvases・画像の位置 image・置いてある画像 placedImage・筆跡ごとの ID と範囲 strokes を返す。include_strokes: false なら strokes を省く"
     )]
@@ -249,11 +263,29 @@ impl CanvasServer {
         &self,
         Parameters(params): Parameters<ChangesParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let changes = self.app.canvas.changes_since(params.since_revision);
-        // Taken after the diff, so the image is the same revision as the diff or newer (see image.revision)
-        let current = self.app.canvas.snapshot();
-        let data = self.placed_image_data(&current);
+        let (changes, current, data) = self.changes_data(params.since_revision);
         view::changes_result(&changes, &current, data.as_deref())
+    }
+
+    #[tool(
+        description = "利用者がキャンバスの Send to AI を押すまで待つ。押されたら sent: true と押したページの canvas(canvases の id)、since_revision からの変更(read_canvas_changes と同じ形。変更があれば画像も付く)を返す。押されないまま約 50 秒たつと sent: false だけを返すので、待ち続けるならすぐにもう一度呼ぶ。AI が待っていない間に押されていれば、すぐに返す"
+    )]
+    async fn wait_for_canvas(
+        &self,
+        Parameters(params): Parameters<ChangesParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        // Waits for a press of the canvas's Send to AI (long polling).
+        // Shorter than Codex's default MCP tool timeout (60 seconds), so it does not hit that limit
+        let Some(canvas) = self
+            .app
+            .ai_inbox
+            .wait(config::WAIT_FOR_CANVAS_TIMEOUT)
+            .await
+        else {
+            return view::not_sent_result();
+        };
+        let (changes, current, data) = self.changes_data(params.since_revision);
+        view::sent_result(canvas, &changes, &current, data.as_deref())
     }
 
     #[tool(

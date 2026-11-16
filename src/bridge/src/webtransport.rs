@@ -14,6 +14,7 @@ use std::time::Duration;
 use serde::de::DeserializeOwned;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::sync::broadcast::error::RecvError;
+use tokio::sync::watch;
 use tracing::{info, warn};
 use wtransport::endpoint::IncomingSession;
 use wtransport::endpoint::endpoint_side::Server;
@@ -21,6 +22,7 @@ use wtransport::{
     Connection, Endpoint as WtEndpoint, Identity, RecvStream, SendStream, ServerConfig,
 };
 
+use crate::ai_inbox;
 use crate::app::{App, BoxError};
 use crate::canvas::{CanvasView, Origin};
 use crate::disconnect::DisconnectWatch;
@@ -130,6 +132,15 @@ impl From<crate::canvas::Snapshot> for ServerMessage {
             strokes: snapshot.strokes,
             image: snapshot.image,
         }
+    }
+}
+
+/// Turns the current AI waiting state into a message for the page. Marks the sent value as seen
+fn ai_status_message(ai_status: &mut watch::Receiver<ai_inbox::AiStatus>) -> ServerMessage {
+    let status = ai_status.borrow_and_update();
+    ServerMessage::AiStatus {
+        waiting: status.waiting,
+        queued: status.queued,
     }
 }
 
@@ -285,6 +296,9 @@ async fn sync(
     let mut images_ready = app.canvas.subscribe_images();
     let (state, mut changes) = app.canvas.subscribe();
     messages.write(&state.into()).await?;
+    // Whether the AI is waiting (Send to AI) is sent once right after snapshot, then whenever it changes
+    let mut ai_status = app.ai_inbox.subscribe();
+    messages.write(&ai_status_message(&mut ai_status)).await?;
     let rotation_start = tokio::time::Instant::now() + config::RESUME_KEY_LIFETIME;
     let mut rotation = tokio::time::interval_at(rotation_start, config::RESUME_KEY_LIFETIME);
 
@@ -306,6 +320,9 @@ async fn sync(
                 messages.write(&ServerMessage::Disconnected).await?;
                 messages.writer.finish().await?;
                 return Ok(());
+            }
+            Ok(()) = ai_status.changed() => {
+                messages.write(&ai_status_message(&mut ai_status)).await?;
             }
             message = messages.read::<ClientMessage>() => match message? {
                 None => return Ok(()),
@@ -331,6 +348,10 @@ async fn sync(
                 }
                 Some(ClientMessage::Resize { viewport, page }) => {
                     app.canvas.set_view(CanvasView { id, ip, page, viewport });
+                }
+                // Send to AI was pressed. Hand it to MCP's wait_for_canvas (the next call if none is waiting)
+                Some(ClientMessage::SendToAi) => {
+                    app.ai_inbox.press(id);
                 }
                 Some(ClientMessage::Hello { .. }) => {}
             },
@@ -654,6 +675,17 @@ mod tests {
         }
     }
 
+    /// The AI waiting state that arrives right after snapshot (false / false, since nothing has happened yet)
+    async fn receive_ai_status(client: &mut Client) {
+        assert_eq!(
+            client.receive().await,
+            ServerMessage::AiStatus {
+                waiting: false,
+                queued: false
+            }
+        );
+    }
+
     /// Sends a Provide header and part of the contents on a unidirectional stream, then cuts it off (reset).
     /// RESET_STREAM discards data not yet delivered, so after sending the header,
     /// it waits for the server to read it before starting to write the contents and cutting them off
@@ -691,6 +723,7 @@ mod tests {
                 image: None
             }
         );
+        receive_ai_status(&mut client).await;
 
         let op = CanvasOp::Insert {
             stroke: stroke("page-1"),
@@ -715,6 +748,41 @@ mod tests {
             (views[0].ip, views[0].viewport, views[0].page),
             (Ipv4Addr::LOCALHOST.into(), VIEWPORT, PAGE)
         );
+
+        // Send to AI: the page's press arrives as AiStatus and is handed to MCP's wait_for_canvas
+        let pressed_by = app
+            .status
+            .all()
+            .into_iter()
+            .filter(|(_, status)| matches!(status, LinkStatus::Connected(_)))
+            .map(|(id, _)| id)
+            .max()
+            .expect("この接続は接続中になっている");
+        client.send(&ClientMessage::SendToAi).await;
+        assert_eq!(
+            client.receive().await,
+            ServerMessage::AiStatus {
+                waiting: false,
+                queued: true
+            }
+        );
+        assert_eq!(
+            app.ai_inbox.wait(Duration::from_millis(500)).await,
+            Some(pressed_by),
+            "wait は押した接続の番号を返す"
+        );
+        // After it is picked up, waiting: false and queued: false are sent.
+        // The waiting: true notice while waiting may be merged with the next one and not arrive
+        loop {
+            match client.receive().await {
+                ServerMessage::AiStatus {
+                    waiting: false,
+                    queued: false,
+                } => break,
+                ServerMessage::AiStatus { .. } => {}
+                other => panic!("AiStatus のはず: {other:?}"),
+            }
+        }
 
         // Images: the bytes arrive on a separate (unidirectional) stream and the placement in an op
         let placement = ImagePlacement {
@@ -978,6 +1046,7 @@ mod tests {
             client.receive().await,
             ServerMessage::Snapshot { .. }
         ));
+        receive_ai_status(&mut client).await;
         // Close the connected connection with the largest number (the last one this test connected)
         let id = app
             .status

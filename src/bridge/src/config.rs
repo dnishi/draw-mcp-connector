@@ -36,3 +36,10 @@ pub const USER_RESPONSE_TIMEOUT: Duration = Duration::from_secs(180);
 /// How long a resume key (resume.rs) can be used. While connected, the key is replaced at this interval;
 /// after disconnecting, the last key handed out stays usable for this long (reconnecting without the approval dialog)
 pub const RESUME_KEY_LIFETIME: Duration = Duration::from_secs(60);
+
+/// The longest time wait_for_canvas (MCP) waits for a Send to AI press.
+/// Shorter than Codex's default MCP tool timeout (60 seconds), so it does not hit that limit
+pub const WAIT_FOR_CANVAS_TIMEOUT: Duration = Duration::from_secs(50);
+/// How long the AI is still treated as waiting after wait_for_canvas returns without a press.
+/// Keeps the page's icon from stopping its pulsing and flickering in the few seconds until the AI calls again
+pub const AI_WAITING_GRACE: Duration = Duration::from_secs(15);

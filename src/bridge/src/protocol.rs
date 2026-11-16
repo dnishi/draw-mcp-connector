@@ -124,6 +124,8 @@ pub enum ClientMessage {
     Op {
         op: CanvasOp,
     },
+    /// Send to AI was pressed. Tells the AI (MCP's wait_for_canvas)
+    SendToAi,
 }
 
 /// Bridge → canvas page. One JSON object per line
@@ -157,6 +159,14 @@ pub enum ServerMessage {
     },
     Op {
         op: CanvasOp,
+    },
+    /// Whether the AI is waiting in wait_for_canvas (waiting) and whether a Send to AI press has not been
+    /// picked up by the AI yet (queued). Sent when syncing starts (right after snapshot) and when it changes
+    AiStatus {
+        /// The AI is waiting in wait_for_canvas (also true during the grace period after a timeout)
+        waiting: bool,
+        /// Pressed, but no wait_for_canvas has picked it up yet
+        queued: bool,
     },
 }
 

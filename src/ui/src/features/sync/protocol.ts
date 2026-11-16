@@ -24,7 +24,9 @@ export type ClientMessage =
   | { type: 'hello'; token: string; viewport: Viewport; page?: PageSize | null; resume?: string | null }
   /** The visible area or paper size changed (screen size, zoom, pan) */
   | { type: 'resize'; viewport: Viewport; page?: PageSize | null }
-  | { type: 'op'; op: CanvasOp };
+  | { type: 'op'; op: CanvasOp }
+  /** Send to AI was pressed. Tells the AI (MCP's wait_for_canvas) */
+  | { type: 'sendToAi' };
 
 /** Position and size of an image (canvas coordinates, CSS pixels). Images are placed under all strokes.
 Only one per canvas for now (referenced by ID, anticipating several in the future) */
@@ -69,7 +71,10 @@ keeps strokes only it has (such as ones written before the bridge restarted), an
 The bridge's image wins, but an image the page has and the bridge does not is sent back with setImage.
 If the page does not have the bytes of the bridge's image, it receives them with an ImageStream request */
   | { type: 'snapshot'; strokes: Stroke[]; image?: ImagePlacement | null }
-  | { type: 'op'; op: CanvasOp };
+  | { type: 'op'; op: CanvasOp }
+  /** Whether the AI is waiting in wait_for_canvas (waiting) and whether a Send to AI press has not been
+picked up by the AI yet (queued). Sent when syncing starts (right after snapshot) and when it changes */
+  | { type: 'aiStatus'; waiting: boolean; queued: boolean };
 
 export interface Stroke {
   /** ID unique across the whole canvas */

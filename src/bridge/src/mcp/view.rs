@@ -261,14 +261,14 @@ pub fn canvas_result(
     result_with_image(&summary, png)
 }
 
-/// Returns a description of the changes and the current canvas image. No image if nothing changed.
+/// Builds a description of the changes and the current canvas image. No image if nothing changed.
 /// data is the image of current.image
-pub fn changes_result(
+fn changes_summary(
     changes: &ChangesSince,
     current: &Snapshot,
     data: Option<&StoredImage>,
-) -> Result<CallToolResult, ErrorData> {
-    let (summary, png) = match changes {
+) -> Result<(ChangesSummary, Option<Vec<u8>>), ErrorData> {
+    match changes {
         ChangesSince::Ops { revision, ops } => {
             let (image, png) = if ops.is_empty() {
                 (None, None)
@@ -281,16 +281,66 @@ pub fn changes_result(
                 ops: ops.iter().map(OpSummary::from).collect(),
                 image,
             };
-            (summary, png)
+            Ok((summary, png))
         }
         ChangesSince::Snapshot(snapshot) => {
             // When the changes cannot be returned, return the whole canvas (it is the current state, so data can be used as is).
             // It replaces the changes, so the stroke list is not omitted
             let (summary, png) = canvas_summary(snapshot, true, data)?;
-            (ChangesSummary::Snapshot(summary), png)
+            Ok((ChangesSummary::Snapshot(summary), png))
         }
+    }
+}
+
+/// Returns a description of the changes and the current canvas image. No image if nothing changed.
+/// data is the image of current.image
+pub fn changes_result(
+    changes: &ChangesSince,
+    current: &Snapshot,
+    data: Option<&StoredImage>,
+) -> Result<CallToolResult, ErrorData> {
+    let (summary, png) = changes_summary(changes, current, data)?;
+    result_with_image(&summary, png)
+}
+
+/// The result of wait_for_canvas: whether it was sent (sent) and the page that pressed (canvas) around the description of the changes
+#[derive(Serialize)]
+struct SentSummary {
+    sent: bool,
+    /// The number of the page that pressed (the id in canvases)
+    canvas: u64,
+    #[serde(flatten)]
+    changes: ChangesSummary,
+}
+
+/// Returns that it was pressed (sent). The description has the same shape as read_canvas_changes,
+/// not nested thanks to flatten
+pub fn sent_result(
+    canvas: u64,
+    changes: &ChangesSince,
+    current: &Snapshot,
+    data: Option<&StoredImage>,
+) -> Result<CallToolResult, ErrorData> {
+    let (changes, png) = changes_summary(changes, current, data)?;
+    let summary = SentSummary {
+        sent: true,
+        canvas,
+        changes,
     };
     result_with_image(&summary, png)
+}
+
+/// Returns that it timed out without a press
+pub fn not_sent_result() -> Result<CallToolResult, ErrorData> {
+    Ok(CallToolResult::success(vec![json_block(
+        &NotSentSummary { sent: false },
+    )?]))
+}
+
+/// The result when it timed out without a press (no description of the changes)
+#[derive(Serialize)]
+struct NotSentSummary {
+    sent: bool,
 }
 
 /// Base64 (RFC 4648 section 4, padded with =). MCP images are sent as Base64 text
@@ -527,6 +577,70 @@ mod tests {
         assert_eq!(
             summary_json(&result),
             serde_json::json!({
+                "kind": "ops",
+                "revision": 4,
+                "canvases": canvases_json(),
+                "ops": []
+            })
+        );
+    }
+
+    #[test]
+    fn not_sent_is_only_sent_false() {
+        let result = not_sent_result().unwrap();
+        assert_eq!(result.content.len(), 1, "画像は無い");
+        assert_eq!(summary_json(&result), serde_json::json!({ "sent": false }));
+    }
+
+    #[test]
+    fn sent_is_flattened_with_the_changes_and_has_image() {
+        let changes = ChangesSince::Ops {
+            revision: 4,
+            ops: vec![CanvasOp::Insert {
+                stroke: stroke("a"),
+                index: 0,
+            }],
+        };
+        let result = sent_result(7, &changes, &snapshot(), None).unwrap();
+        assert_eq!(result.content.len(), 2, "変更があれば画像付き");
+        assert_eq!(
+            summary_json(&result),
+            serde_json::json!({
+                "sent": true,
+                "canvas": 7,
+                "kind": "ops",
+                "revision": 4,
+                "canvases": canvases_json(),
+                "ops": [{
+                    "type": "insert",
+                    "index": 0,
+                    "stroke": {
+                        "id": "a",
+                        "author": "ai",
+                        "color": "#000000",
+                        "bounds": { "x": 7, "y": 7, "width": 16, "height": 6 }
+                    }
+                }],
+                "image": { "revision": 4, "x": 0.0, "y": 0.0, "width": 30.0, "height": 20.0, "scale": 1.0 }
+            })
+        );
+        // Not nested thanks to flatten
+        assert!(summary_json(&result).get("changes").is_none());
+    }
+
+    #[test]
+    fn sent_without_changes_has_no_image() {
+        let changes = ChangesSince::Ops {
+            revision: 4,
+            ops: Vec::new(),
+        };
+        let result = sent_result(7, &changes, &snapshot(), None).unwrap();
+        assert_eq!(result.content.len(), 1, "変更が無ければ画像なし");
+        assert_eq!(
+            summary_json(&result),
+            serde_json::json!({
+                "sent": true,
+                "canvas": 7,
                 "kind": "ops",
                 "revision": 4,
                 "canvases": canvases_json(),

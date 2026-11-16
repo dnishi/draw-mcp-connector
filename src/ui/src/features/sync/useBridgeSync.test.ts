@@ -201,6 +201,47 @@ describe('useBridgeSync', () => {
     expect(result.current.reconnect).not.toBeNull();
   });
 
+  it('aiStatus を受け取るまで sendToAi は使えず、受け取ると { type: "sendToAi" } を送る', async () => {
+    const { result } = setup();
+    await waitFor(() => expect(sent).toHaveLength(1));
+
+    await receive({ type: 'snapshot', strokes: [] });
+    expect(result.current.status).toBe('connected');
+    expect(result.current.sendToAi).toBeNull();
+
+    await receive({ type: 'aiStatus', waiting: false, queued: false });
+    expect(result.current.sendToAi).not.toBeNull();
+    act(() => result.current.sendToAi?.());
+    expect(sent.at(-1)).toEqual({ type: 'sendToAi' });
+  });
+
+  it('aiStatus の waiting・queued が aiWaiting・sendQueued に出る', async () => {
+    const { result } = setup();
+    await waitFor(() => expect(sent).toHaveLength(1));
+    await receive({ type: 'snapshot', strokes: [] });
+
+    await receive({ type: 'aiStatus', waiting: true, queued: true });
+    expect(result.current.aiWaiting).toBe(true);
+    expect(result.current.sendQueued).toBe(true);
+
+    await receive({ type: 'aiStatus', waiting: false, queued: false });
+    expect(result.current.aiWaiting).toBe(false);
+    expect(result.current.sendQueued).toBe(false);
+  });
+
+  it('切れたら aiWaiting・sendQueued が false、sendToAi が null になる', async () => {
+    const { result } = setup();
+    await waitFor(() => expect(sent).toHaveLength(1));
+    await receive({ type: 'snapshot', strokes: [] });
+    await receive({ type: 'aiStatus', waiting: true, queued: true });
+
+    act(() => handlers.onClose());
+    expect(result.current.status).toBe('disconnected');
+    expect(result.current.aiWaiting).toBe(false);
+    expect(result.current.sendQueued).toBe(false);
+    expect(result.current.sendToAi).toBeNull();
+  });
+
   it('接続情報が無ければ、繋ぎ直せない', () => {
     const { result } = renderHook(() =>
       useBridgeSync({

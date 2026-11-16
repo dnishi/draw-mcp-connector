@@ -36,6 +36,15 @@ describe('CanvasPage', () => {
     expect(sidebar.queryByLabelText('Canvas')).toBeNull();
   });
 
+  it('接続していないとき、サイドバーに Send to AI があり、押せない', () => {
+    render(<CanvasPage />);
+    const sidebar = within(
+      screen.getByRole('complementary', { name: 'Sidebar' }),
+    );
+
+    expect(sidebar.getByRole('button', { name: 'Send to AI' })).toBeDisabled();
+  });
+
   it('接続の状態はサイドバーの一番上(ツールより前)に置く', () => {
     render(<CanvasPage />);
     const sidebar = screen.getByRole('complementary', { name: 'Sidebar' });
