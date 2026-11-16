@@ -113,6 +113,12 @@ impl Lease<'_> {
         &self.key
     }
 
+    /// Invalidates the current key immediately (when the connection is closed from the PC's menu).
+    /// Dropping the Lease afterwards does nothing in start_countdown, because the key is no longer listed
+    pub fn revoke(&mut self) {
+        self.keys.remove(&self.key);
+    }
+
     /// Replaces the key with a new one and invalidates the old one immediately. Returns the new key
     pub fn rotate(&mut self) -> &str {
         let next = self.keys.add(&self.superseded);
@@ -169,6 +175,16 @@ mod tests {
         assert_ne!(old, new);
         assert!(!keys.redeem(&old));
         assert!(keys.redeem(&new));
+    }
+
+    #[test]
+    fn revoking_keeps_the_key_unusable_after_drop() {
+        let keys = ResumeKeys::new(LIFETIME);
+        let mut lease = keys.issue();
+        let key = lease.key().to_owned();
+        lease.revoke();
+        drop(lease);
+        assert!(!keys.redeem(&key), "無効にした鍵は、切断後にも使えない");
     }
 
     #[test]

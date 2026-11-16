@@ -2,6 +2,7 @@
 
 use crate::canvas::Canvas;
 use crate::config;
+use crate::disconnect::DisconnectRequests;
 use crate::link_status::LinkStatusCell;
 use crate::pairing::Pairing;
 use crate::resume::ResumeKeys;
@@ -14,6 +15,8 @@ pub struct App {
     pub pairing: Pairing,
     pub resume_keys: ResumeKeys,
     pub status: LinkStatusCell,
+    /// Where connection tasks are asked to close (the menu's Disconnect)
+    pub disconnects: DisconnectRequests,
     pub ui: Ui,
 }
 
@@ -24,6 +27,7 @@ impl App {
             pairing: Pairing::new(),
             resume_keys: ResumeKeys::new(config::RESUME_KEY_LIFETIME),
             status: LinkStatusCell::default(),
+            disconnects: DisconnectRequests::default(),
             ui: Ui::default(),
         }
     }

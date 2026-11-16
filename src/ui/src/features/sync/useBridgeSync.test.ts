@@ -188,6 +188,19 @@ describe('useBridgeSync', () => {
     expect(result.current.reconnect).not.toBeNull();
   });
 
+  it('PC 側で切られたら、状態の文に出す', async () => {
+    const { result } = setup();
+    await waitFor(() => expect(sent).toHaveLength(1));
+    await receive({ type: 'snapshot', strokes: [] });
+
+    await receive({ type: 'disconnected' });
+    act(() => handlers.onClose());
+    expect(result.current.status).toBe('disconnected');
+    expect(result.current.message).toMatch(/Disconnected on the PC/);
+    expect(result.current.superseded).toBe(false);
+    expect(result.current.reconnect).not.toBeNull();
+  });
+
   it('接続情報が無ければ、繋ぎ直せない', () => {
     const { result } = renderHook(() =>
       useBridgeSync({

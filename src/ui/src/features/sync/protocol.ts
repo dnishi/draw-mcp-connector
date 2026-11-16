@@ -62,6 +62,8 @@ Sending the last received key with hello reconnects without waiting for approval
   | { type: 'resumeKey'; key: string }
   /** Another connection reconnected with the key handed to this connection. The connection is closed after this */
   | { type: 'superseded' }
+  /** The connection was closed from the PC's menu. The connection is closed after this */
+  | { type: 'disconnected' }
   /** Approved. The whole canvas the bridge has. The page matches it,
 keeps strokes only it has (such as ones written before the bridge restarted), and sends them back with insert.
 The bridge's image wins, but an image the page has and the bridge does not is sent back with setImage.

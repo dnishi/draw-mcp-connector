@@ -13,6 +13,7 @@ mod approval_dialog;
 mod canvas;
 mod color;
 mod config;
+mod disconnect;
 mod geometry;
 mod glyphs;
 #[cfg(any(test, target_os = "macos", target_os = "windows"))]

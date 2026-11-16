@@ -33,6 +33,9 @@ interface Options {
 const SUPERSEDED_MESSAGE =
   'Another canvas page reconnected to the PC in place of this one.';
 
+const DISCONNECTED_ON_PC_MESSAGE =
+  'Disconnected on the PC. Select the status at the top right to reconnect.';
+
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -124,6 +127,10 @@ export function useBridgeSync({
           rejectedReason = SUPERSEDED_MESSAGE;
           disconnect(SUPERSEDED_MESSAGE);
           setSuperseded(true);
+          return;
+        case 'disconnected':
+          rejectedReason = DISCONNECTED_ON_PC_MESSAGE;
+          disconnect(DISCONNECTED_ON_PC_MESSAGE);
           return;
       }
     };

@@ -44,12 +44,12 @@ impl LinkStatusCell {
         *self.status.borrow()
     }
 
-    /// States of all ongoing connections, in connection order (by connection number)
+    /// All ongoing connections (connection number and state), in connection order (by connection number)
     #[cfg(any(test, target_os = "macos", target_os = "windows"))]
-    pub fn all(&self) -> Vec<LinkStatus> {
+    pub fn all(&self) -> Vec<(u64, LinkStatus)> {
         let mut links = lock(&self.links).clone();
         links.sort_by_key(|(id, _)| *id);
-        links.into_iter().map(|(_, status)| status).collect()
+        links
     }
 
     /// Changes the state of connection `connection` (Waiting or Connected)
@@ -113,8 +113,11 @@ mod tests {
     const IP: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 168, 0, 2));
     const OTHER: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 168, 0, 3));
 
-    /// Records the state of all connections each time a notification arrives
-    fn record_notifications(cell: &Arc<LinkStatusCell>) -> Arc<Mutex<Vec<Vec<LinkStatus>>>> {
+    /// All connections at one point in time (number and state)
+    type Links = Vec<(u64, LinkStatus)>;
+
+    /// Records all connections each time a notification arrives
+    fn record_notifications(cell: &Arc<LinkStatusCell>) -> Arc<Mutex<Vec<Links>>> {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let (log, weak) = (seen.clone(), Arc::downgrade(cell));
         cell.set_listener(move || {
@@ -138,8 +141,8 @@ mod tests {
         assert_eq!(
             *seen.lock().unwrap(),
             [
-                vec![LinkStatus::Waiting(IP)],
-                vec![LinkStatus::Connected(IP)],
+                vec![(1, LinkStatus::Waiting(IP))],
+                vec![(1, LinkStatus::Connected(IP))],
                 vec![],
             ]
         );
@@ -156,12 +159,15 @@ mod tests {
         cell.set(1, LinkStatus::Connected(IP));
         assert_eq!(
             cell.all(),
-            [LinkStatus::Connected(IP), LinkStatus::Connected(OTHER)]
+            [
+                (1, LinkStatus::Connected(IP)),
+                (2, LinkStatus::Connected(OTHER))
+            ]
         );
         assert_eq!(seen.lock().unwrap().len(), 2);
 
         cell.remove(2);
-        assert_eq!(cell.all(), [LinkStatus::Connected(IP)]);
+        assert_eq!(cell.all(), [(1, LinkStatus::Connected(IP))]);
         assert_eq!(seen.lock().unwrap().len(), 3);
     }
 

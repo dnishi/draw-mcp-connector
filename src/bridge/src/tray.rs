@@ -1,5 +1,6 @@
 //! Menu bar (macOS) / notification area (Windows) icon, and the QR code window.
-//! The app's only UI is the menu (connection status, "Show QR Code", "Open Canvas", "About", "Quit"), the QR code window,
+//! The app's only UI is the menu (connection status, "Show QR Code", "Open Canvas", "About", "Quit";
+//! a connected status line has a "Disconnect" submenu), the QR code window,
 //! and the connection approval dialog (approval_dialog.rs).
 //! On macOS the event loop and icon must run on the main thread (per the tray-icon documentation).
 
@@ -9,7 +10,10 @@ use tao::event::{Event, StartCause, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopWindowTarget};
 use tao::window::{Theme, Window, WindowBuilder};
 use tracing::warn;
-use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+use tray_icon::menu::{
+    Icon as MenuIcon, IconMenuItem, IsMenuItem, Menu, MenuEvent, MenuId, MenuItem,
+    PredefinedMenuItem, Submenu,
+};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
 use crate::app::App;
@@ -43,18 +47,94 @@ fn status_text(status: LinkStatus) -> String {
     }
 }
 
-/// Status lines of the menu. One line per connection (in connection order). A single Not Connected line if there are none
-fn status_lines(links: &[LinkStatus]) -> Vec<String> {
+/// Status lines of the menu. One line per connection (in connection order). A single Disconnected line
+/// (with no number) if there are none
+fn status_rows(links: &[(u64, LinkStatus)]) -> Vec<(Option<u64>, LinkStatus)> {
     if links.is_empty() {
-        return vec![status_text(LinkStatus::Disconnected)];
+        return vec![(None, LinkStatus::Disconnected)];
     }
-    links.iter().copied().map(status_text).collect()
+    links
+        .iter()
+        .map(|(id, status)| (Some(*id), *status))
+        .collect()
 }
 
-/// A menu item for a status line. Pressing it does nothing, but it is enabled
-/// (disabled items are shown in faint gray on macOS and are hard to read)
-fn status_item(text: &str) -> MenuItem {
-    MenuItem::new(text, true, None)
+/// The dot at the start of a status line. Same color as the icon's dot; no dot when not connected
+fn status_dot(status: LinkStatus, appearance: Appearance) -> Option<MenuIcon> {
+    let rgba = icon::dot_rgba(badge(status), appearance)?;
+    let dot = MenuIcon::from_rgba(rgba, icon::DOT_SIZE, icon::DOT_SIZE);
+    Some(dot.expect("丸の大きさは正しい"))
+}
+
+/// A menu item for a status line. A connected line is enabled and has a "Disconnect" submenu;
+/// other lines are disabled
+enum StatusItem {
+    Connected {
+        row: Submenu,
+        /// The "Disconnect" item in the submenu
+        disconnect: MenuItem,
+        /// Number of the connection this line shows
+        connection: u64,
+    },
+    /// Pressing it would do nothing, so it is disabled (shown in faint text on macOS)
+    Plain(IconMenuItem),
+}
+
+impl StatusItem {
+    /// The item added to and removed from the menu (the submenu line when connected)
+    fn menu_item(&self) -> &dyn IsMenuItem {
+        match self {
+            Self::Connected { row, .. } => row,
+            Self::Plain(item) => item,
+        }
+    }
+
+    /// The connection number if the pressed item's id is this line's "Disconnect"
+    fn disconnect_connection(&self, id: &MenuId) -> Option<u64> {
+        match self {
+            Self::Connected {
+                disconnect,
+                connection,
+                ..
+            } if *id == *disconnect.id() => Some(*connection),
+            _ => None,
+        }
+    }
+
+    fn set_status(&self, status: LinkStatus, appearance: Appearance) {
+        let text = status_text(status);
+        let dot = status_dot(status, appearance);
+        match self {
+            Self::Connected { row, .. } => {
+                row.set_text(text);
+                row.set_icon(dot);
+            }
+            Self::Plain(item) => {
+                item.set_text(text);
+                item.set_icon(dot);
+            }
+        }
+    }
+}
+
+/// Creates a status line. A connected connection becomes a submenu holding a single "Disconnect";
+/// anything else is a disabled item
+fn status_row(id: Option<u64>, status: LinkStatus) -> StatusItem {
+    if let Some(connection) = id
+        && matches!(status, LinkStatus::Connected(_))
+    {
+        let row = Submenu::new("", true);
+        let disconnect = MenuItem::new("Disconnect", true, None);
+        if let Err(error) = row.append(&disconnect) {
+            warn!("Disconnect の項目を足せない: {error}");
+        }
+        return StatusItem::Connected {
+            row,
+            disconnect,
+            connection,
+        };
+    }
+    StatusItem::Plain(IconMenuItem::new("", false, None, None))
 }
 
 fn appearance(theme: Theme) -> Appearance {
@@ -79,7 +159,9 @@ struct Indicator {
     tray: TrayIcon,
     menu: Menu,
     /// Status lines placed at the top of the menu
-    status_items: Vec<MenuItem>,
+    status_items: Vec<StatusItem>,
+    /// Layout of the lines (connection number, whether connected), used to decide when to recreate the items
+    row_kinds: Vec<(Option<u64>, bool)>,
     /// State to display, used for the icon's dot color (the state of the connection whose state changed last)
     status: LinkStatus,
     appearance: Appearance,
@@ -87,11 +169,15 @@ struct Indicator {
 
 impl Indicator {
     /// status sets the icon's dot color, and links the menu's status lines (every connection)
-    fn update(&mut self, status: LinkStatus, links: &[LinkStatus], appearance: Appearance) {
+    fn update(&mut self, status: LinkStatus, links: &[(u64, LinkStatus)], appearance: Appearance) {
         self.status = status;
         self.appearance = appearance;
-        let lines = status_lines(links);
-        self.replace_status_items(&lines);
+        let rows = status_rows(links);
+        self.replace_status_items(&rows, appearance);
+        let lines: Vec<String> = rows
+            .iter()
+            .map(|(_, status)| status_text(*status))
+            .collect();
         // It is a colored image, so show it as is rather than as a template image
         if let Err(error) = self.tray.set_icon(Some(icon(status, appearance))) {
             warn!("アイコンを変えられない: {error}");
@@ -102,25 +188,38 @@ impl Indicator {
         }
     }
 
-    /// Matches the status lines to lines. Recreates the items only when the number of lines changes
-    fn replace_status_items(&mut self, lines: &[String]) {
-        if self.status_items.len() != lines.len() {
+    /// Matches the status lines to rows. Recreates the items only when the layout of the lines (connection number
+    /// and whether connected) changes; otherwise replaces only the text and dot
+    fn replace_status_items(&mut self, rows: &[(Option<u64>, LinkStatus)], appearance: Appearance) {
+        let kinds: Vec<(Option<u64>, bool)> = rows
+            .iter()
+            .map(|(id, status)| (*id, matches!(status, LinkStatus::Connected(_))))
+            .collect();
+        if self.row_kinds != kinds {
             for item in self.status_items.drain(..) {
-                if let Err(error) = self.menu.remove(&item) {
+                if let Err(error) = self.menu.remove(item.menu_item()) {
                     warn!("メニューの項目を消せない: {error}");
                 }
             }
-            for (position, line) in lines.iter().enumerate() {
-                let item = status_item(line);
-                if let Err(error) = self.menu.insert(&item, position) {
+            for (position, (id, status)) in rows.iter().enumerate() {
+                let item = status_row(*id, *status);
+                if let Err(error) = self.menu.insert(item.menu_item(), position) {
                     warn!("メニューの項目を足せない: {error}");
                 }
                 self.status_items.push(item);
             }
+            self.row_kinds = kinds;
         }
-        for (item, line) in self.status_items.iter().zip(lines) {
-            item.set_text(line);
+        for (item, (_, status)) in self.status_items.iter().zip(rows) {
+            item.set_status(*status, appearance);
         }
+    }
+
+    /// The number of the connection to close if the pressed item is a status line's "Disconnect"
+    fn connection_to_disconnect(&self, id: &MenuId) -> Option<u64> {
+        self.status_items
+            .iter()
+            .find_map(|item| item.disconnect_connection(id))
     }
 }
 
@@ -193,7 +292,7 @@ struct MenuItems {
 /// Creates the menu bar icon and menu. Status lines are inserted at the top by update
 fn create_indicator(
     status: LinkStatus,
-    links: &[LinkStatus],
+    links: &[(u64, LinkStatus)],
     appearance: Appearance,
     items: &MenuItems,
 ) -> Indicator {
@@ -215,6 +314,7 @@ fn create_indicator(
         tray,
         menu,
         status_items: Vec::new(),
+        row_kinds: Vec::new(),
         status,
         appearance,
     };
@@ -308,6 +408,14 @@ pub fn run(app: Arc<App>, start: impl FnOnce()) -> ! {
                 qr_window.take();
                 indicator.take();
                 *control_flow = ControlFlow::Exit;
+            }
+            // "Disconnect" was pressed on a connected status line
+            Event::UserEvent(UserEvent::Menu(event)) => {
+                if let Some(indicator) = &indicator
+                    && let Some(connection) = indicator.connection_to_disconnect(&event.id)
+                {
+                    app.disconnects.request(connection);
+                }
             }
             Event::RedrawRequested(id) => {
                 if let Some(window) = qr_window.as_mut().filter(|w| w.id() == id) {

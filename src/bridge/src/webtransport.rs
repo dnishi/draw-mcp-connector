@@ -23,6 +23,7 @@ use wtransport::{
 
 use crate::app::{App, BoxError};
 use crate::canvas::{CanvasView, Origin};
+use crate::disconnect::DisconnectWatch;
 use crate::link_status::LinkStatus;
 use crate::lock::lock;
 use crate::net;
@@ -206,6 +207,8 @@ async fn handle_session(app: Arc<App>, incoming: IncomingSession, id: u64) -> Re
             key: resume_key.key().into(),
         })
         .await?;
+    // Be ready for a close request from the PC's menu as soon as the connection is shown as connected
+    let disconnect = app.disconnects.watch(id);
     app.status.set(id, LinkStatus::Connected(ip));
     app.canvas.set_view(CanvasView {
         id,
@@ -220,6 +223,7 @@ async fn handle_session(app: Arc<App>, incoming: IncomingSession, id: u64) -> Re
         id,
         ip,
         &mut resume_key,
+        &disconnect,
     )
     .await;
     app.canvas.remove_view(id);
@@ -267,6 +271,7 @@ async fn sync(
     id: u64,
     ip: IpAddr,
     resume_key: &mut Lease<'_>,
+    disconnect: &DisconnectWatch<'_>,
 ) -> Result<(), BoxError> {
     let origin = Origin::Connection(id);
     // Receiving and sending image streams are each handled in a separate task (so that large image transfers
@@ -292,6 +297,13 @@ async fn sync(
             () = resume_key.superseded() => {
                 info!("接続 {id} に渡した鍵で別の接続が繋ぎ直したので、この接続を切る");
                 messages.write(&ServerMessage::Superseded).await?;
+                messages.writer.finish().await?;
+                return Ok(());
+            }
+            () = disconnect.requested() => {
+                info!("接続 {id} を PC のメニューから切る");
+                resume_key.revoke();
+                messages.write(&ServerMessage::Disconnected).await?;
                 messages.writer.finish().await?;
                 return Ok(());
             }
@@ -957,5 +969,35 @@ mod tests {
             ServerMessage::AwaitingApproval,
             "使った鍵では許可を求める"
         );
+
+        // Closing from the PC's menu: invalidate the key, tell the page, and close the connection
+        let (mut client, connection) = connect(&app, None).await;
+        assert_eq!(client.receive().await, ServerMessage::AwaitingApproval);
+        let key = receive_resume_key(&mut client).await;
+        assert!(matches!(
+            client.receive().await,
+            ServerMessage::Snapshot { .. }
+        ));
+        // Close the connected connection with the largest number (the last one this test connected)
+        let id = app
+            .status
+            .all()
+            .into_iter()
+            .filter(|(_, status)| matches!(status, LinkStatus::Connected(_)))
+            .map(|(id, _)| id)
+            .max()
+            .expect("この接続は接続中になっている");
+        assert!(app.disconnects.request(id));
+        assert_eq!(client.receive().await, ServerMessage::Disconnected);
+        connection.closed().await;
+        // The key handed to the closed connection is invalid, so approval is asked again
+        let (mut client, _connection) = connect(&app, Some(key)).await;
+        assert_eq!(
+            client.receive().await,
+            ServerMessage::AwaitingApproval,
+            "切った接続の鍵では許可を求める"
+        );
+        // After it closes (after the watch is dropped), it can no longer be requested
+        wait_until(|| !app.disconnects.request(id)).await;
     }
 }

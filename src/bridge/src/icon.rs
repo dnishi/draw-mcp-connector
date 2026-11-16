@@ -1,5 +1,6 @@
 //! Menu bar icon. A tablet frame and a handwritten line show it is a handwriting app,
 //! and the color of the dot at the bottom right shows the connection state with the canvas (no dot when disconnected).
+//! The status lines of the menu get a dot of the same color at their start (dot_rgba).
 //!
 //! It is shown as a colored image (a template image can only use one color),
 //! so the frame and line are drawn in colors matching the OS appearance (light / dark).
@@ -145,15 +146,41 @@ pub fn rgba(badge: Badge, appearance: Appearance) -> Vec<u8> {
     let pen = pen_points();
     let fg = foreground(appearance);
     let badge = badge_color(badge, appearance);
-    let mut pixels = Vec::with_capacity((SIZE * SIZE * 4) as usize);
-    for py in 0..SIZE {
-        for px in 0..SIZE {
+    rasterize(SIZE, SCALE, |p| shade(p, &pen, fg, badge))
+}
+
+/// Width and height in pixels of the dot image at the start of a menu status line (16pt, doubled for Retina)
+pub const DOT_SIZE: u32 = 32;
+const DOT_SCALE: f32 = DOT_SIZE as f32 / 16.0;
+/// Center and radius of the dot (in 16pt coordinates)
+const DOT_CENTER: (f32, f32) = (8.0, 8.0);
+const DOT_RADIUS: f32 = 4.5;
+
+/// The dot at the start of a menu status line (DOT_SIZE x DOT_SIZE RGBA). Same color as the icon's dot.
+/// None for a state whose icon has no dot (not connected)
+pub fn dot_rgba(badge: Badge, appearance: Appearance) -> Option<Vec<u8>> {
+    let color = badge_color(badge, appearance)?;
+    Some(rasterize(DOT_SIZE, DOT_SCALE, |(x, y)| {
+        if (x - DOT_CENTER.0).hypot(y - DOT_CENTER.1) <= DOT_RADIUS {
+            (color.0, color.1, color.2, 1.0)
+        } else {
+            (0.0, 0.0, 0.0, 0.0)
+        }
+    }))
+}
+
+/// Draws size x size RGBA. shade gives the color (RGB and opacity) of one point (coordinates divided by scale).
+/// Samples SAMPLES x SAMPLES points per pixel to smooth the edges
+fn rasterize(size: u32, scale: f32, shade: impl Fn((f32, f32)) -> (f32, f32, f32, f32)) -> Vec<u8> {
+    let mut pixels = Vec::with_capacity((size * size * 4) as usize);
+    for py in 0..size {
+        for px in 0..size {
             let mut sum = (0.0, 0.0, 0.0, 0.0);
             for sy in 0..SAMPLES {
                 for sx in 0..SAMPLES {
-                    let x = (px as f32 + (sx as f32 + 0.5) / SAMPLES as f32) / SCALE;
-                    let y = (py as f32 + (sy as f32 + 0.5) / SAMPLES as f32) / SCALE;
-                    let (r, g, b, a) = shade((x, y), &pen, fg, badge);
+                    let x = (px as f32 + (sx as f32 + 0.5) / SAMPLES as f32) / scale;
+                    let y = (py as f32 + (sy as f32 + 0.5) / SAMPLES as f32) / scale;
+                    let (r, g, b, a) = shade((x, y));
                     sum = (sum.0 + r * a, sum.1 + g * a, sum.2 + b * a, sum.3 + a);
                 }
             }
@@ -215,6 +242,29 @@ mod tests {
         assert_eq!(
             pixel(&rgba(Badge::Waiting, Appearance::Dark), x, y),
             [0xff, 0x9f, 0x0a, 255]
+        );
+    }
+
+    #[test]
+    fn dot_has_the_badge_color() {
+        let center = |pixels: &[u8]| {
+            let (px, py) = (
+                (DOT_CENTER.0 * DOT_SCALE) as usize,
+                (DOT_CENTER.1 * DOT_SCALE) as usize,
+            );
+            let i = (py * DOT_SIZE as usize + px) * 4;
+            <[u8; 4]>::try_from(&pixels[i..i + 4]).unwrap()
+        };
+        let connected = dot_rgba(Badge::Connected, Appearance::Light).unwrap();
+        assert_eq!(connected.len(), (DOT_SIZE * DOT_SIZE * 4) as usize);
+        assert_eq!(center(&connected), [0x34, 0xc7, 0x59, 255]);
+        assert_eq!(connected[3], 0, "角は透明");
+        let waiting = dot_rgba(Badge::Waiting, Appearance::Dark).unwrap();
+        assert_eq!(center(&waiting), [0xff, 0x9f, 0x0a, 255]);
+        assert_eq!(
+            dot_rgba(Badge::None, Appearance::Light),
+            None,
+            "未接続は丸なし"
         );
     }
 
