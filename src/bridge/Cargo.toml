@@ -1,6 +1,6 @@
 [package]
 name = "bridge"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 # The app is MIT. The bundled glyph data (assets/kanjivg/glyphs.bin) is CC BY-SA 3.0
 license = "MIT AND CC-BY-SA-3.0"
