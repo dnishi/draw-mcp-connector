@@ -1,17 +1,19 @@
 //! Entry point to the app's UI (the menu bar app): the QR code window, the connection approval dialog, and the first-run guide.
 //!
 //! The window is owned by the main-thread event loop (tray.rs), and the approval dialog is shown by the per-OS implementation
-//! (approval_dialog.rs). The servers (WebTransport, MCP) run on another thread,
+//! (approval_dialog.rs: osascript on macOS, PowerShell on Windows). The servers (WebTransport, MCP) run on another thread,
 //! so they ask through functions registered at startup. On OSes without a tray (Linux, etc.), nothing is registered.
 
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use tokio::sync::Mutex;
 use tracing::warn;
 
 use crate::app::App;
+use crate::config;
 
 type Opener = Box<dyn Fn() -> bool + Send + Sync>;
 /// Shows an approval dialog (does not wait for the answer)
@@ -62,7 +64,7 @@ impl Ui {
     }
 
     /// Registers the function that shows the approval dialog (once)
-    #[cfg(any(test, target_os = "macos"))]
+    #[cfg(any(test, target_os = "macos", target_os = "windows"))]
     pub fn set_approver<P: ApprovalPrompt + 'static>(
         &self,
         approver: impl Fn(IpAddr) -> P + Send + Sync + 'static,
@@ -81,6 +83,13 @@ impl Ui {
     /// Asks for approval of a connection. Denies if there is no way to ask.
     /// If this is dropped before the answer (the connecting party disconnected), the dialog is closed
     pub async fn ask_approval(&self, ip: IpAddr) -> bool {
+        self.ask_approval_within(ip, config::USER_RESPONSE_TIMEOUT)
+            .await
+    }
+
+    /// The body of ask_approval. Takes the limit on waiting for the answer as an argument (so tests can use a short one).
+    /// Enforces the limit here on every OS (the Windows MessageBox has no timeout; the macOS dialog also closes itself)
+    async fn ask_approval_within(&self, ip: IpAddr, timeout: Duration) -> bool {
         let Some(approver) = self.approver.get() else {
             warn!("この OS では接続の許可を求められないため、{ip} からの接続を断る");
             return false;
@@ -88,9 +97,16 @@ impl Ui {
         let _one_at_a_time = self.asking.lock().await;
         let prompt = approver(ip);
         let _close_when_dropped = CloseOnDrop(prompt.clone());
-        tokio::task::spawn_blocking(move || prompt.answer())
-            .await
-            .unwrap_or(false)
+        // The limit applies only to waiting after the dialog is shown (not to the time spent waiting for our turn).
+        // A timeout or a spawn_blocking failure is a denial. On timeout, dropping _close_when_dropped closes the dialog
+        tokio::time::timeout(
+            timeout,
+            tokio::task::spawn_blocking(move || prompt.answer()),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or(false)
     }
 }
 
@@ -179,5 +195,16 @@ mod tests {
         let asked = tokio::time::timeout(Duration::from_millis(50), ui.ask_approval(IP)).await;
         assert!(asked.is_err(), "答えは出ていない");
         assert!(closed.load(Ordering::Relaxed), "待つのをやめたら閉じる");
+    }
+
+    #[tokio::test]
+    async fn denies_when_the_answer_comes_too_late() {
+        let ui = Ui::default();
+        let closed = Arc::new(AtomicBool::new(false));
+        let flag = closed.clone();
+        ui.set_approver(move |_| Unanswered(flag.clone()));
+
+        assert!(!ui.ask_approval_within(IP, Duration::from_millis(50)).await);
+        assert!(closed.load(Ordering::Relaxed), "時間切れで閉じる");
     }
 }

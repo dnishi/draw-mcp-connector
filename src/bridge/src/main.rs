@@ -8,8 +8,8 @@ mod ai_inbox;
 mod app;
 #[cfg(test)]
 mod app_icon;
-// The connection approval dialog is macOS only (tests also run on other OSes)
-#[cfg(any(test, target_os = "macos"))]
+// The connection approval dialog is for macOS / Windows (tests also run on the development Linux)
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
 mod approval_dialog;
 mod canvas;
 mod color;
@@ -77,7 +77,6 @@ fn main() {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
         // The main thread runs the tray event loop, so the servers run on another thread
-        #[cfg(target_os = "macos")]
         app.ui.set_approver(approval_dialog::ask);
         let server_app = app.clone();
         tray::run(app, move || {

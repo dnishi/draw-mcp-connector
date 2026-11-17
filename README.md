@@ -25,15 +25,15 @@ The canvas is a page you open in a browser. It works on an iPad, smartphone, tab
 
 1. Choose "Show QR Code" from the Draw MCP Connector icon in the menu bar (you can also ask your AI agent to "connect the canvas")
 2. Scan the QR code with the camera of the device you will write on, and open the canvas
-3. Press "Allow" in the dialog on your PC (the dot on the menu bar icon is orange while waiting for approval and green when connected)
+3. Press "Allow" ("Yes" on Windows) in the dialog on your PC (the dot on the menu bar icon is orange while waiting for approval and green when connected)
 
 Several devices can connect at once. Strokes are shared across all devices, and the menu shows one line per connected device with its state and IP address.
 
-If the connection drops after you allowed it, reconnecting from the same tab within 1 minute (reloading the page, or the connection status at the top of the sidebar) connects again without the dialog. After closing the tab or after 1 minute, press "Allow" again. If another page takes over this page's connection and reconnects, this page is disconnected and a dialog tells you so.
+If the connection drops after you allowed it, reconnecting from the same tab within 1 minute (reloading the page, or the connection status at the top of the sidebar) connects again without the dialog. After closing the tab or after 1 minute, press "Allow" ("Yes" on Windows) again. If another page takes over this page's connection and reconnects, this page is disconnected and a dialog tells you so.
 
 ## Opening in the browser on your PC
 
-Choose "Open Canvas" from the Draw MCP Connector icon in the menu bar to open the canvas in this PC's default browser. As with the QR code, press "Allow" in the dialog on your PC to connect, and you can write with the mouse.
+Choose "Open Canvas" from the Draw MCP Connector icon in the menu bar to open the canvas in this PC's default browser. As with the QR code, press "Allow" ("Yes" on Windows) in the dialog on your PC to connect, and you can write with the mouse.
 
 ## Shapes and text drawn by the AI
 
