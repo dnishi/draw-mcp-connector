@@ -105,7 +105,7 @@ export interface Stroke {
   color?: string;
 }
 
-/** A point of a stroke. Coordinates are CSS pixels with the origin at the top left of the canvas */
+/** One point of a stroke. Coordinates are CSS pixels with the origin at the top left of the canvas */
 export interface StrokePoint {
   x: number;
   y: number;

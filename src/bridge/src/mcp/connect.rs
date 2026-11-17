@@ -7,18 +7,19 @@ use crate::link_status::LinkStatus;
 
 pub async fn connect_canvas(app: &App) -> String {
     if let LinkStatus::Connected(ip) = app.status.get() {
-        return format!("キャンバス({ip})は接続済みです。");
+        return format!("The canvas ({ip}) is already connected.");
     }
     if app.pairing.canvas_url().is_none() {
-        return "キャンバスと接続する準備ができていません。少し待ってから、もう一度実行してください。"
-            .into();
+        return "Not ready to connect to the canvas yet. Wait a moment and run this again.".into();
     }
     if !app.ui.open_qr() {
-        return "QR コードのウィンドウを開けません(この OS ではメニューバーのアプリとして動いていません)。".into();
+        return "Cannot open the QR code window (the app is not running as a menu bar app on this OS)."
+            .into();
     }
     match app.status.wait_connected(config::USER_RESPONSE_TIMEOUT).await {
-        Some(ip) => format!("キャンバス({ip})を接続しました。"),
-        None => "制限時間内に接続されませんでした。PC に表示した QR コードをカメラで読み取ってキャンバスを開き、Draw MCP Connector のダイアログで許可してから、もう一度実行してください。".into(),
+        Some(ip) => format!("The canvas ({ip}) is connected."),
+        None => "The canvas did not connect within the time limit. Scan the QR code shown on the PC with a camera to open the canvas, approve it in the Draw MCP Connector dialog, and then run this again."
+            .into(),
     }
 }
 
@@ -63,7 +64,7 @@ mod tests {
 
         assert_eq!(
             connect_canvas(&app).await,
-            "キャンバス(192.168.0.2)を接続しました。"
+            "The canvas (192.168.0.2) is connected."
         );
         assert!(opened.load(Ordering::Relaxed));
     }
@@ -74,13 +75,13 @@ mod tests {
         app.status.set(1, LinkStatus::Connected(IP));
         assert_eq!(
             connect_canvas(&app).await,
-            "キャンバス(192.168.0.2)は接続済みです。"
+            "The canvas (192.168.0.2) is already connected."
         );
     }
 
     #[tokio::test]
     async fn reports_when_window_cannot_open() {
         let text = connect_canvas(&app_with_endpoint()).await;
-        assert!(text.contains("ウィンドウを開けません"));
+        assert!(text.contains("Cannot open the QR code window"));
     }
 }

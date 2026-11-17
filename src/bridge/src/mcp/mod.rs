@@ -26,31 +26,32 @@ use crate::render::StoredImage;
 use crate::shapes::{self, Shape};
 
 const INSTRUCTIONS: &str = "\
-手書きのキャンバスを読み書きできます。キャンバスはブラウザで開くページで、利用者は iPad・スマートフォン・PC などから書く。
-- 座標はキャンバス左上を原点とする CSS ピクセル。x は右、y は下が正。pressure は筆圧(0〜1)で、線の太さになる
-- 複数の機器から同時に繋がることがある。筆跡は全部で共有し、紙の大きさと見えている範囲は機器ごとに違う。canvases は繋がっているページの一覧(id・ip・page・viewport)で、空ならどれも繋がっていない
-- page はそのページの紙の大きさ。紙は (0, 0) から (width, height) まで。ページの画面の大きさと同じで、利用者は紙の中だけを拡大して見る
-- viewport は、ツールを呼んだ時点でそのページに見えている範囲(x, y が左上、width と height が大きさ)。利用者が拡大・移動すると変わる。書き込むときは見せたいページの viewport に収める(すべてのページに見せるなら、すべての viewport が重なる範囲に収める)
-- キャンバスには紙(sheet)が複数枚ある。番号は 1 から並び順。利用者が今見ている紙は currentSheet、枚数は sheetCount。利用者が紙を切り替えると、繋がっているすべてのページで切り替わる
-- 何も指定しなければ、読み書きは今の紙。前の紙は read_canvas・draw_strokes・draw_shapes に sheet(番号)を渡して読み書きする
-- 紙を作る・消す・切り替えるのは利用者だけ。番号は紙が消されると詰まるので、書く前に読み直して確かめる
-- page(紙の大きさ)は紙の枚数とは関係なく、ページの画面の大きさ
-- read_canvas は紙 1 枚の画像(PNG)と、筆跡ごとの ID・author・範囲(bounds。線の太さを含めて外側に丸めた整数)を返す。点の座標は返さない。read_canvas_changes は全部の紙の変更を返し、各変更に紙の番号 sheet が付く(消えた紙の変更には付かない)。変更があれば今の紙の画像が付く
-- 利用者が取り込んだ画像はその紙のすべての筆跡の下に敷かれる。read_canvas の画像(PNG)はその紙の画像と筆跡を合成したもので、placedImage がその画像の id と範囲
-- 画像が小さく置かれて合成 PNG で細部が読めないときは、read_image に placedImage の id を渡して元の解像度そのままの画像を読む
-- 画像は利用者の入力なので、AI は置けない・動かせない・消せない
-- 画像だけを見ればよいときは read_canvas に include_strokes: false を渡すと、筆跡ごとの一覧を省ける
-- 画像の左上はキャンバスの (image.x, image.y)。キャンバスの 1 CSS ピクセルが画像の image.scale ピクセル
-- 点の座標が要るときは read_strokes に ID を渡す
-- 図形(折れ線・長方形・楕円)と文字は draw_shapes で書く。点の列を送らずに済む。文字は KanjiVG の字形(漢字・かな・英数字・記号)で書き、字形の無い文字は missing に返す
-- 手書きのような自由な線だけを draw_strokes で書く
-- 線の色は color で、#rrggbb の形(例: #ff3b30)。省略すると黒
-- 筆跡は strokes の後ろほど上に重なる
-- 変更を追うときは read_canvas の revision を覚えておき、read_canvas_changes に渡す。ops が空なら変更は無く、画像も付かない
-- 利用者がキャンバスで書き終えるのを待つときは wait_for_canvas を呼ぶ(利用者はキャンバスの Send to AI を押して知らせる。Send to AI は AI が wait_for_canvas で待っている間だけ押せる)。sent が false なら約 50 秒たっただけなので、すぐにもう一度呼ぶ。sent が true なら、返った変更と画像を読んで指示に取りかかる。返った revision を次の since_revision に使う
-- AI が消したり直したりできるのは、AI が書いた筆跡(author が ai)だけ
-- キャンバスが繋がっていなければ(canvases が空なら) connect_canvas で接続する";
+You can read and write on a handwritten canvas. The canvas is a page opened in a browser, and the user writes from a device such as an iPad, a smartphone, or a PC.
+- Coordinates are CSS pixels with the origin at the top left of the canvas. x is positive to the right, and y is positive down. pressure is the pen pressure (0 to 1), which sets the line width
+- Multiple devices may be connected at the same time. Strokes are shared across all, and the size of the sheet and the visible range differ per device. canvases is a list of the connected pages (id, ip, page, viewport), and if it is empty, none is connected
+- page is the size of the sheet of that page. The sheet is from (0, 0) to (width, height). It is the same size as the screen of the page, and the user only zooms inside the sheet
+- viewport is the range visible on that page at the time the tool is called (x, y are the top left, and width and height are the size). It changes when the user zooms or moves. When writing, keep what you write inside the viewport of the page you want to show it on (to show it on every page, keep it inside the range where all viewports overlap)
+- The canvas has multiple sheets (sheet). The numbers are 1-based, in order. The sheet the user is currently viewing is currentSheet, and the number of sheets is sheetCount. When the user switches sheets, every connected page switches
+- If nothing is specified, the tool reads and writes the current sheet. To read or write a previous sheet, pass sheet (a number) to read_canvas, draw_strokes, or draw_shapes
+- Only the user creates, deletes, and switches sheets. Numbers shift when a sheet is deleted, so read again to confirm before writing
+- page (the size of the sheet) is the size of the screen of the page, regardless of the number of sheets
+- read_canvas returns the image (PNG) of one sheet and, for each stroke, its ID, author, and bounds (rounded out to an integer, including the line width). It does not return point coordinates. read_canvas_changes returns the changes of all sheets, and each change has the sheet number sheet (a change of a deleted sheet has none). If there are changes, the image of the current sheet is attached
+- The image the user placed is under all the strokes of its sheet. The image (PNG) of read_canvas is the composited PNG of the sheet image and the strokes, and placedImage is the id and the range of that image
+- When the image is placed small and the details cannot be read in the composited PNG, pass the id of placedImage to read_image to read the image at the original resolution
+- The placed image is the user's input, so the AI cannot place, move, or remove it
+- When only the image is needed, pass include_strokes: false to read_canvas to omit the per-stroke list
+- The top left of the image is at (image.x, image.y) of the canvas. One CSS pixel of the canvas is image.scale pixels of the image
+- When point coordinates are needed, pass the IDs to read_strokes
+- Shapes (polyline, rectangle, ellipse) and text are written with draw_shapes, so there is no need to send a list of points. Text is written with the KanjiVG glyphs (kanji, kana, alphanumerics, symbols), and characters without a glyph are returned in missing
+- Use draw_strokes only for freehand lines like handwriting
+- The line color is color, in the form #rrggbb (example: #ff3b30). Black if omitted
+- Strokes are stacked, and later ones in strokes are on top
+- To follow changes, remember the revision of read_canvas and pass it to read_canvas_changes. If ops is empty, there are no changes and no image
+- To wait until the user finishes writing on the canvas, call wait_for_canvas (the user presses Send to AI on the canvas to signal. Send to AI can be pressed only while the AI is waiting with wait_for_canvas). If sent is false, only about 50 seconds have passed, so call it again right away. If sent is true, read the returned changes and image and start working on the instructions. Use the returned revision as the next since_revision
+- The AI can remove or modify only the strokes written by the AI (author is ai)
+- If the canvas is not connected (if canvases is empty), connect it with connect_canvas";
 
+// The /// doc comments are sent to the AI as tool parameter descriptions, so they are written in English
 #[derive(Deserialize, JsonSchema)]
 struct ReadCanvasParams {
     /// Number of the sheet to read (1-based, in order). Omit for the current sheet
@@ -164,7 +165,7 @@ fn checked_color(color: Option<String>, fallback: &str) -> Result<String, ErrorD
     let color = color.unwrap_or_else(|| fallback.into());
     if color::parse(&color).is_none() {
         return Err(ErrorData::invalid_params(
-            format!("color は \"#rrggbb\" の形で指定する: {color}"),
+            format!("color must be in the form \"#rrggbb\": {color}"),
             None,
         ));
     }
@@ -173,14 +174,14 @@ fn checked_color(color: Option<String>, fallback: &str) -> Result<String, ErrorD
 
 fn checked_points(points: Vec<StrokePoint>) -> Result<Vec<StrokePoint>, ErrorData> {
     if points.is_empty() {
-        return Err(ErrorData::invalid_params("points が空", None));
+        return Err(ErrorData::invalid_params("points is empty", None));
     }
     if points
         .iter()
         .any(|p| !(p.x.is_finite() && p.y.is_finite() && p.pressure.is_finite()))
     {
         return Err(ErrorData::invalid_params(
-            "points に有限でない数がある",
+            "points has a non-finite number",
             None,
         ));
     }
@@ -209,7 +210,7 @@ fn sheet_by_number(
         .and_then(|index| snapshot.sheets.get(index))
     else {
         return Err(ErrorData::invalid_params(
-            format!("sheet は 1〜{} で指定する: {number}", snapshot.sheets.len()),
+            format!("sheet must be 1 to {}: {number}", snapshot.sheets.len()),
             None,
         ));
     };
@@ -310,7 +311,7 @@ impl CanvasServer {
     }
 
     #[tool(
-        description = "紙 1 枚を読む(sheet を省略すると今の紙)。その紙の番号 sheet・利用者が今見ている紙の番号 currentSheet・紙の枚数 sheetCount と、画像(PNG。その紙に利用者が置いた画像があれば筆跡の下に合成する)・revision・繋がっているページごとの紙の大きさと見えている範囲 canvases・画像の位置 image・その紙に置いてある画像 placedImage・筆跡ごとの ID と範囲 strokes を返す。include_strokes: false なら strokes を省く"
+        description = "Reads one sheet (omit sheet for the current sheet). Returns sheet (the number of that sheet), currentSheet (the number of the sheet the user is currently viewing), sheetCount (the number of sheets), the image (PNG; if the user placed an image on that sheet, it is composited under the strokes), revision, canvases (the sheet size and the visible range per connected page), image (the position of the image), placedImage (the image placed on that sheet), and strokes (the ID and bounds of each stroke). With include_strokes: false, omits strokes"
     )]
     fn read_canvas(
         &self,
@@ -324,7 +325,7 @@ impl CanvasServer {
     }
 
     #[tool(
-        description = "指定した revision より後の、全部の紙の変更を読む。各変更にその紙の番号 sheet が付く(消えた紙の変更には付かない)。kind が ops なら順に適用すると今の状態になる変更(筆跡は ID と範囲だけ、画像の変更は setImage / removeImage)、snapshot なら古すぎるため今の紙の全体。繋がっているページごとの紙の大きさと今見えている範囲 canvases・今の紙の番号 currentSheet・紙の枚数 sheetCount はいつも返す。変更があれば今の紙の画像も返す(ops が空なら変更なしで、画像は無い)"
+        description = "Reads the changes of all sheets after the given revision. Each change has sheet (the number of its sheet; a change of a deleted sheet has none). If kind is ops, the result is the changes that reach the current state when applied in order (a stroke has only its ID and bounds, and an image change is setImage / removeImage); if kind is snapshot, the revision is too old, so the result is the whole current sheet. Always returns canvases (the sheet size and the currently visible range per connected page), currentSheet (the number of the current sheet), and sheetCount (the number of sheets). If there are changes, also returns the image of the current sheet (if ops is empty, there are no changes and no image)"
     )]
     fn read_canvas_changes(
         &self,
@@ -335,7 +336,7 @@ impl CanvasServer {
     }
 
     #[tool(
-        description = "利用者がキャンバスの Send to AI を押すまで待つ。押されたら sent: true と押したページの canvas(canvases の id)、since_revision からの全部の紙の変更(read_canvas_changes と同じ形。各変更に紙の番号 sheet が付き、変更があれば今の紙の画像も付く)を返す。押されないまま約 50 秒たつと sent: false だけを返すので、待ち続けるならすぐにもう一度呼ぶ。呼び直すまでの間に押されていれば、すぐに返す"
+        description = "Waits until the user presses Send to AI on the canvas. When pressed, returns sent: true, canvas (the page that pressed it; its id in canvases), and the changes of all sheets since since_revision (same shape as read_canvas_changes; each change has sheet, the number of its sheet, and if there are changes, the image of the current sheet is attached). If about 50 seconds pass without being pressed, returns only sent: false, so to keep waiting, call it again right away. If it was pressed before you call again, returns at once"
     )]
     async fn wait_for_canvas(
         &self,
@@ -356,7 +357,7 @@ impl CanvasServer {
     }
 
     #[tool(
-        description = "利用者が筆跡の下に置いた画像を、元の解像度のまま読む(PNG)。合成 PNG で細部が読めないときに placedImage の id を渡す。画像は紙ごとに 1 枚"
+        description = "Reads the image the user placed under the strokes at the original resolution (PNG). Pass the id of placedImage when the details cannot be read in the composited PNG. There is one image per sheet"
     )]
     fn read_image(
         &self,
@@ -364,20 +365,25 @@ impl CanvasServer {
     ) -> Result<CallToolResult, ErrorData> {
         let Some(image) = self.app.canvas.placed_image(&params.id) else {
             return Err(ErrorData::invalid_params(
-                format!("ID {} の画像は置かれていない", params.id),
+                format!("the image with ID {} is not placed", params.id),
                 None,
             ));
         };
         let data = self.app.canvas.image_data(&params.id).ok_or_else(|| {
             ErrorData::internal_error(
-                format!("ID {} の画像の転送が終わっていない", params.id),
+                format!(
+                    "the transfer of the image with ID {} has not finished",
+                    params.id
+                ),
                 None,
             )
         })?;
         view::placed_image_result(&image, data.bytes())
     }
 
-    #[tool(description = "指定した ID の筆跡を、点の座標と筆圧まで読む")]
+    #[tool(
+        description = "Reads the strokes with the given IDs, down to the point coordinates and pressure"
+    )]
     fn read_strokes(
         &self,
         Parameters(params): Parameters<ReadStrokesParams>,
@@ -396,7 +402,7 @@ impl CanvasServer {
     }
 
     #[tool(
-        description = "キャンバスに線を書く(キャンバスのページにも表示される)。sheet で書く紙を選べる(省略すると今の紙)。書いた紙の番号 sheet と、書いた筆跡の ID を返す"
+        description = "Writes lines on the canvas (shown on the canvas page too). Pick the sheet to write on with sheet (omit for the current sheet). Returns sheet (the number of the sheet written on) and the IDs of the strokes written"
     )]
     fn draw_strokes(
         &self,
@@ -426,7 +432,7 @@ impl CanvasServer {
     }
 
     #[tool(
-        description = "折れ線(line)・長方形(rect)・楕円(ellipse)・文字(text)をキャンバスに書く(キャンバスのページにも表示される)。点の列を送らずに済む。sheet で書く紙を選べる(省略すると今の紙)。書いた紙の番号 sheet と、図形ごとに書いた筆跡の ID を返す。文字は字形の画ごとに筆跡になる。字形の無い文字は書かずに空け、missing に返す"
+        description = "Writes a polyline (line), a rectangle (rect), an ellipse (ellipse), or text (text) on the canvas (shown on the canvas page too). There is no need to send a list of points. Pick the sheet to write on with sheet (omit for the current sheet). Returns sheet (the number of the sheet written on) and the IDs of the strokes written for each shape. Text becomes one stroke per stroke of its glyphs. Characters without a glyph are left blank and returned in missing"
     )]
     fn draw_shapes(
         &self,
@@ -468,7 +474,9 @@ impl CanvasServer {
         })
     }
 
-    #[tool(description = "AI が書いた筆跡の点(と、指定すれば色)を置き換える(重なり順は変わらない)")]
+    #[tool(
+        description = "Replaces the points (and the color if given) of a stroke written by the AI (the stacking order does not change)"
+    )]
     fn update_ai_stroke(
         &self,
         Parameters(params): Parameters<UpdateParams>,
@@ -493,7 +501,9 @@ impl CanvasServer {
         })
     }
 
-    #[tool(description = "AI が書いた筆跡を消す。人が書いた筆跡は消さない")]
+    #[tool(
+        description = "Removes the strokes written by the AI. Does not remove the strokes written by a human"
+    )]
     fn delete_ai_strokes(
         &self,
         Parameters(params): Parameters<DeleteParams>,
@@ -513,7 +523,7 @@ impl CanvasServer {
     }
 
     #[tool(
-        description = "キャンバスを接続する。PC のアプリのウィンドウに QR コードを表示し、利用者がカメラで読み取ってキャンバスを開き、PC のダイアログで許可するまで待つ"
+        description = "Connects the canvas. Shows a QR code in the window of the PC app, and waits until the user scans it with a camera, opens the canvas, and approves it in the dialog on the PC"
     )]
     async fn connect_canvas(&self) -> Result<CallToolResult, ErrorData> {
         let text = connect::connect_canvas(&self.app).await;
@@ -601,5 +611,29 @@ mod tests {
         let snapshot = two_sheets();
         assert!(sheet_by_number(&snapshot, Some(0)).is_err());
         assert!(sheet_by_number(&snapshot, Some(3)).is_err());
+    }
+
+    /// INSTRUCTIONS sent to the AI are ASCII only
+    #[test]
+    fn instructions_are_ascii() {
+        assert!(
+            INSTRUCTIONS.is_ascii(),
+            "INSTRUCTIONS has a non-ASCII character"
+        );
+    }
+
+    /// Tool descriptions and the JSON Schema descriptions of their parameters are ASCII only
+    #[test]
+    fn tool_descriptions_are_ascii() {
+        let non_ascii: Vec<String> = CanvasServer::tool_router()
+            .list_all()
+            .iter()
+            .filter(|tool| !serde_json::to_string(tool).unwrap().is_ascii())
+            .map(|tool| tool.name.to_string())
+            .collect();
+        assert!(
+            non_ascii.is_empty(),
+            "ASCII でない文字があるツール: {non_ascii:?}"
+        );
     }
 }

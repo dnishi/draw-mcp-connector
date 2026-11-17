@@ -27,6 +27,7 @@ const ELLIPSE_STEP: f64 = 4.0;
 /// Default pressure of shapes
 const DEFAULT_SHAPE_PRESSURE: f64 = 0.5;
 
+// The /// doc comments are sent to the AI as tool parameter descriptions, so they are written in English
 #[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
 pub struct Position {
     pub x: f64,
@@ -82,13 +83,13 @@ fn check_finite(values: &[f64]) -> Result<(), String> {
     if values.iter().all(|v| v.is_finite()) {
         Ok(())
     } else {
-        Err("有限でない数がある".into())
+        Err("there is a non-finite number".into())
     }
 }
 
 fn check_not_negative(name: &str, value: f64) -> Result<(), String> {
     if value < 0.0 {
-        return Err(format!("{name} は 0 以上にする: {value}"));
+        return Err(format!("{name} must be 0 or more: {value}"));
     }
     Ok(())
 }
@@ -179,7 +180,7 @@ pub fn outline(shape: &Shape) -> Result<Outline, String> {
     let (polylines, default_pressure) = match &shape.kind {
         ShapeKind::Line { points } => {
             if points.len() < 2 {
-                return Err("line の points は 2 点以上にする".into());
+                return Err("line needs 2 or more points".into());
             }
             let polyline: Polyline = points.iter().map(|p| (p.x, p.y)).collect();
             check_finite(
@@ -216,11 +217,11 @@ pub fn outline(shape: &Shape) -> Result<Outline, String> {
             check_finite(&[*x, *y, *size])?;
             if !(*size > 0.0 && *size <= MAX_TEXT_SIZE) {
                 return Err(format!(
-                    "size は 0 より大きく {MAX_TEXT_SIZE} 以下にする: {size}"
+                    "size must be greater than 0 and at most {MAX_TEXT_SIZE}: {size}"
                 ));
             }
             if content.chars().count() > MAX_TEXT_CHARS {
-                return Err(format!("text は {MAX_TEXT_CHARS} 文字までにする"));
+                return Err(format!("text must be at most {MAX_TEXT_CHARS} characters"));
             }
             (
                 text(content, *x, *y, *size, &mut missing),

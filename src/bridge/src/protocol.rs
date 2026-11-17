@@ -22,7 +22,8 @@ fn default_color() -> String {
     color::BLACK.into()
 }
 
-/// A point of a stroke. Coordinates are CSS pixels with the origin at the top left of the canvas
+// The /// doc comments are sent to the AI as tool parameter descriptions, so they are written in English
+/// One point of a stroke. Coordinates are CSS pixels with the origin at the top left of the canvas
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct StrokePoint {
     pub x: f64,

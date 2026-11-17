@@ -259,8 +259,9 @@ fn render_image(
         (Some(image), Some(stored)) => Some((image, stored)),
         _ => None,
     };
-    let image = render::render(&sheet.strokes, &regions, placed, clip)
-        .map_err(|error| ErrorData::internal_error(format!("画像を作れない: {error}"), None))?;
+    let image = render::render(&sheet.strokes, &regions, placed, clip).map_err(|error| {
+        ErrorData::internal_error(format!("cannot make the image: {error}"), None)
+    })?;
     Ok(image.map(|image| {
         let info = ImageInfo {
             revision: snapshot.revision,
