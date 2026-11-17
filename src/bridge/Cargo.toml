@@ -30,3 +30,10 @@ tao = "0.37.2"
 tray-icon = "0.26.1"
 # Draws pixels in the QR code window. The default features are only Linux render targets, so they are disabled
 softbuffer = { version = "0.4.8", default-features = false }
+
+# About brings the app to the front and then shows the standard macOS About panel (about.rs).
+# All are the same versions tao and muda use
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.5"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSResponder"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSAttributedString", "NSDictionary", "NSString"] }

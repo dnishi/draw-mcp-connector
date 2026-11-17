@@ -15,8 +15,8 @@ use crate::ui::ApprovalPrompt;
 const ALLOW: &str = "Allow";
 const DENY: &str = "Deny";
 
-/// Escapes characters that have a special meaning inside an AppleScript string (also used by the About dialog)
-pub fn quote(text: &str) -> String {
+/// Escapes characters that have a special meaning inside an AppleScript string
+fn quote(text: &str) -> String {
     format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
 }
 

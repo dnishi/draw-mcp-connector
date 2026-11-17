@@ -248,9 +248,10 @@ fn open_canvas(app: &App) {
     }
 }
 
-/// About in the menu. On macOS, pressing it shows the standard dialog (about::show).
-/// muda's standard About panel is not used (for apps not in the Dock it may appear behind other windows,
-/// and this was not verified on real hardware; we use the method confirmed to come to the front for the approval dialog)
+/// About in the menu. On macOS it is a plain item; pressing it brings the app to the front and then
+/// shows the standard About panel (about::show). muda's PredefinedMenuItem::about is not used
+/// (it does not bring the app to the front before showing the panel; for apps not in the Dock,
+/// the panel may appear behind other windows)
 #[cfg(target_os = "macos")]
 type AboutItem = MenuItem;
 /// On Windows, use muda's About (a message box)

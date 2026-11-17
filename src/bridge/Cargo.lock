@@ -205,6 +205,9 @@ version = "0.3.0"
 dependencies = [
  "axum",
  "getrandom 0.4.3",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
  "open",
  "png",
  "rmcp",
