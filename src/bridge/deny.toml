@@ -8,6 +8,12 @@ targets = ["aarch64-apple-darwin", "x86_64-pc-windows-msvc"]
 [advisories]
 # RustSec advisories. Defaults: vulnerabilities and notices are errors, unmaintained crates are errors,
 # unsound is an error only for crates this crate uses directly, yanked versions are warnings
+ignore = [
+    # chrono is unmaintained (not a vulnerability, and there is no fixed version). This app does not use it, but
+    # rmcp (the official MCP SDK) uses it directly and through schemars' chrono04 feature, so it cannot be removed (same in rmcp 3.10.0).
+    # When this expires, check whether rmcp has dropped chrono
+    { id = "RUSTSEC-2026-0543", reason = "used only by rmcp (official MCP SDK); waiting for rmcp to drop chrono", expiry = "2027-02-17" },
+]
 
 [licenses]
 # The app is distributed under MIT. Only the licenses required by the current dependencies (Cargo.lock) are allowed.
