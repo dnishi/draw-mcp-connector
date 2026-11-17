@@ -8,8 +8,21 @@ import {
 } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { connectBridge, type BridgeHandlers } from '../sync/bridgeClient';
+import type { ConnectionInfo } from '../sync/connectionInfo';
+import type { ServerMessage } from '../sync/protocol';
 import { CanvasPage } from './CanvasPage';
 import { UNSUPPORTED_BROWSER_MESSAGE } from './StrokeRenderer';
+
+// jsdom has no WebTransport, and passing connectionInfo would try it, so mock
+// connectBridge as useBridgeSync.test.ts does
+vi.mock('../sync/bridgeClient', () => ({ connectBridge: vi.fn() }));
+
+const connectionInfo: ConnectionInfo = {
+  url: 'https://192.0.2.1:4433/',
+  certificateHash: new Uint8Array(32),
+  token: 't',
+};
 
 describe('CanvasPage', () => {
   // jsdom has no navigator.gpu, so it behaves like a browser without WebGPU
@@ -342,6 +355,47 @@ describe('CanvasPage', () => {
 
       fireEvent.pointerLeave(canvas(), { pointerType: 'mouse' });
       expect(eraserCursor()).not.toBeVisible();
+    });
+  });
+
+  describe('紙の切り替え', () => {
+    it('キャンバスの右上に切り替えが出て、「New Sheet」で紙が増える', async () => {
+      render(<CanvasPage />);
+
+      expect(
+        screen.getByRole('button', { name: 'Sheet 1 / 1' }),
+      ).toBeInTheDocument();
+
+      await userEvent.click(screen.getByRole('button', { name: 'New Sheet' }));
+
+      expect(
+        screen.getByRole('button', { name: 'Sheet 2 / 2' }),
+      ).toBeInTheDocument();
+    });
+
+    it('古い bridge(sheet の無い snapshot)と同期しているときは切り替えが出ない', async () => {
+      let handlers: BridgeHandlers;
+      vi.mocked(connectBridge).mockImplementation(async (_, h) => {
+        handlers = h;
+        return {
+          send: vi.fn(),
+          sendImageBytes: vi.fn(),
+          requestImageBytes: vi.fn(),
+          close: vi.fn(),
+        };
+      });
+      render(<CanvasPage connectionInfo={connectionInfo} />);
+
+      await act(async () => {
+        // The snapshot shape of bridges up to v0.3.0 (no sheets)
+        handlers.onMessage({
+          type: 'snapshot',
+          strokes: [],
+          image: null,
+        } as unknown as ServerMessage);
+      });
+
+      expect(screen.queryByRole('button', { name: 'Sheet 1 / 1' })).toBeNull();
     });
   });
 });

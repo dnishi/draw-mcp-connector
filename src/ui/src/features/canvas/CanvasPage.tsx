@@ -6,6 +6,7 @@ import { CameraDialog } from './CameraDialog';
 import { useCameraAvailable } from './camera';
 import { ConnectionStatusBadge } from './ConnectionStatusBadge';
 import { SendToAiButton } from './SendToAiButton';
+import { SheetSwitcher } from './SheetSwitcher';
 import { SupersededDialog } from './SupersededDialog';
 import { BLACK } from './color';
 import { useCustomColor } from './customColor';
@@ -70,6 +71,7 @@ export function CanvasPage({ connectionInfo = null }: CanvasPageProps) {
     image,
     setImage,
     previewImage,
+    sheets,
   } = useCanvasDrawing(
     canvasRef,
     {
@@ -94,9 +96,8 @@ export function CanvasPage({ connectionInfo = null }: CanvasPageProps) {
     reconnect,
     superseded,
     dismissSuperseded,
-    aiWaiting,
-    sendQueued,
     sendToAi,
+    singleSheet,
   } = useBridgeSync({
     info: connectionInfo,
     viewport,
@@ -274,6 +275,12 @@ export function CanvasPage({ connectionInfo = null }: CanvasPageProps) {
           onImageDelete={() => setImage(null)}
         />
 
+        {/* Sheet switcher, overlaid at the top right. Hidden while syncing with an old bridge (which handles a single sheet) */}
+        {!singleSheet && (
+          <div className="absolute top-4 right-4">
+            <SheetSwitcher sheets={sheets} />
+          </div>
+        )}
         {notice && (
           <p
             role="alert"
@@ -293,12 +300,8 @@ export function CanvasPage({ connectionInfo = null }: CanvasPageProps) {
         aria-label="Sidebar"
         className="flex w-18 shrink-0 flex-col items-center gap-2 overflow-y-auto overscroll-contain border-l bg-background p-2"
       >
-        <ConnectionStatusBadge
-          status={status}
-          onReconnect={reconnect}
-          aiWaiting={aiWaiting}
-        />
-        <SendToAiButton onSend={sendToAi} queued={sendQueued} />
+        <ConnectionStatusBadge status={status} onReconnect={reconnect} />
+        <SendToAiButton onSend={sendToAi} />
         {/* Separates the status icon from the tool buttons so they can be told apart */}
         <Separator />
         <Toolbar

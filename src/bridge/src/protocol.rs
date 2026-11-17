@@ -9,6 +9,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::color;
 
+/// Version of the page–bridge protocol. The page sends it in hello, and the bridge rejects a different one.
+/// Pages from before sheets do not send it, so it is taken as 0
+pub const PROTOCOL_VERSION: u32 = 1;
+/// Maximum number of sheets
+pub const MAX_SHEETS: usize = 50;
+/// ID of the first sheet, and of the sheet left after deleting all sheets. The bridge and the page start with
+/// the same ID, so after the bridge restarts it matches the first sheet of a reconnecting page
+pub const INITIAL_SHEET_ID: &str = "sheet-1";
+
 fn default_color() -> String {
     color::BLACK.into()
 }
@@ -53,21 +62,49 @@ pub struct ImagePlacement {
     pub height: f64,
 }
 
-/// A change to the canvas. Used both page → bridge and bridge → page
+/// Contents of one sheet. The paper size (PageSize) is each connection's screen size and is not kept per sheet
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Sheet {
+    /// ID unique across the whole canvas
+    pub id: String,
+    /// Stacking order (later strokes are on top)
+    pub strokes: Vec<Stroke>,
+    /// Image placed under the strokes (one per sheet). None if there is none
+    #[serde(default)]
+    pub image: Option<ImagePlacement>,
+}
+
+/// A change to the canvas. Used both page → bridge and bridge → page.
+/// Stroke and image changes carry the sheet they apply to in `sheet` (the sheet ID)
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum CanvasOp {
-    /// Inserts a stroke at position index (stacking order). Appends it if out of range
-    Insert { stroke: Stroke, index: usize },
-    /// Removes strokes. Unknown IDs are ignored
-    Remove { ids: Vec<String> },
-    /// Replaces the stroke with the same ID, keeping its stacking order
-    Replace { stroke: Stroke },
-    /// Places an image (also used to replace it with a new position or size). Replaces any existing image.
+    /// Inserts a stroke at position index (stacking order) on that sheet. Out of range puts it at the end
+    Insert {
+        sheet: String,
+        stroke: Stroke,
+        index: usize,
+    },
+    /// Removes strokes from that sheet. Missing IDs are ignored
+    Remove { sheet: String, ids: Vec<String> },
+    /// Replaces the stroke with the same ID on that sheet, keeping the stacking order
+    Replace { sheet: String, stroke: Stroke },
+    /// Places the image on that sheet (also used to move or resize it). Replaces any existing image.
     /// The bytes are sent on a separate stream (ImageStream)
-    SetImage { image: ImagePlacement },
-    /// Removes the image. Ignored if there is no image
-    RemoveImage,
+    SetImage {
+        sheet: String,
+        image: ImagePlacement,
+    },
+    /// Removes the image from that sheet. Ignored if there is no image
+    RemoveImage { sheet: String },
+    /// Inserts an empty sheet at position index. Out of range puts it at the end
+    AddSheet { id: String, index: usize },
+    /// Removes a sheet with its contents
+    RemoveSheet { id: String },
+    /// Changes the current sheet
+    SelectSheet { id: String },
+    /// Removes all sheets and makes one empty `INITIAL_SHEET_ID` sheet the current sheet
+    ResetSheets,
 }
 
 /// Header on the first line of a separate stream that carries image bytes (opened one-to-one, apart from the bidirectional stream).
@@ -114,6 +151,9 @@ pub enum ClientMessage {
         /// Resume key (resumeKey) received on a previous connection. Not sent if there is none
         #[serde(default)]
         resume: Option<String>,
+        /// Protocol version. Pages from before sheets do not send it, so it is taken as 0
+        #[serde(default)]
+        protocol: u32,
     },
     /// The visible area or paper size changed (screen size, zoom, pan)
     Resize {
@@ -147,15 +187,16 @@ pub enum ServerMessage {
     Superseded,
     /// The connection was closed from the PC's menu. The connection is closed after this
     Disconnected,
-    /// Approved. The whole canvas the bridge has. The page matches it,
-    /// keeps strokes only it has (such as ones written before the bridge restarted), and sends them back with insert.
-    /// The bridge's image wins, but an image the page has and the bridge does not is sent back with setImage.
-    /// If the page does not have the bytes of the bridge's image, it receives them with an ImageStream request
+    /// Approved. The whole canvas held by the bridge (the sheets and the current sheet's ID). The page follows it:
+    /// sheets only it has (such as ones written before the bridge restarted) are sent back with addSheet and insert
+    /// if they have contents, and empty ones are discarded. The current sheet is the bridge's.
+    /// The bridge's images win, but an image only the page has is sent back with setImage.
+    /// If the page lacks the bytes of a bridge image, it receives them with an ImageStream request
     Snapshot {
-        strokes: Vec<Stroke>,
-        /// The placed image. None if there is none
-        #[serde(default)]
-        image: Option<ImagePlacement>,
+        /// Sheets (in stacking order)
+        sheets: Vec<Sheet>,
+        /// ID of the current sheet
+        current: String,
     },
     Op {
         op: CanvasOp,
@@ -181,12 +222,29 @@ mod tests {
     );
 
     fn generated() -> String {
-        typescript::generate(&[
+        let mut output = typescript::generate(&[
             schemars::schema_for!(ClientMessage),
             schemars::schema_for!(ServerMessage),
             // Not referenced from the message types, but the page uses it for the stream header
             schemars::schema_for!(ImageStream),
-        ])
+        ]);
+        // Append the constants after the types (doc is the same text as the Rust comment)
+        output.push_str(&typescript::constant(
+            "PROTOCOL_VERSION",
+            "Version of the page–bridge protocol. The page sends it in hello, and the bridge rejects a different one.\nPages from before sheets do not send it, so it is taken as 0",
+            &serde_json::to_value(PROTOCOL_VERSION).unwrap(),
+        ));
+        output.push_str(&typescript::constant(
+            "MAX_SHEETS",
+            "Maximum number of sheets",
+            &serde_json::to_value(MAX_SHEETS).unwrap(),
+        ));
+        output.push_str(&typescript::constant(
+            "INITIAL_SHEET_ID",
+            "ID of the first sheet, and of the sheet left after deleting all sheets. The bridge and the page start with\nthe same ID, so after the bridge restarts it matches the first sheet of a reconnecting page",
+            &serde_json::to_value(INITIAL_SHEET_ID).unwrap(),
+        ));
+        output
     }
 
     #[test]
@@ -218,43 +276,65 @@ mod tests {
     }
 
     #[test]
-    fn image_ops_use_camel_case_and_snapshot_image_is_optional() {
-        let message = ServerMessage::Op {
-            op: CanvasOp::SetImage {
+    fn sheet_ops_use_camel_case() {
+        assert_eq!(
+            serde_json::to_value(CanvasOp::AddSheet {
+                id: "s".into(),
+                index: 1
+            })
+            .unwrap(),
+            serde_json::json!({ "type": "addSheet", "id": "s", "index": 1 })
+        );
+        assert_eq!(
+            serde_json::to_value(CanvasOp::ResetSheets).unwrap(),
+            serde_json::json!({ "type": "resetSheets" })
+        );
+        assert_eq!(
+            serde_json::to_value(CanvasOp::Insert {
+                sheet: "s".into(),
+                stroke: Stroke {
+                    id: "st".into(),
+                    author: Author::Human,
+                    color: color::BLACK.into(),
+                    points: vec![]
+                },
+                index: 0
+            })
+            .unwrap(),
+            serde_json::json!({
+                "type": "insert",
+                "sheet": "s",
+                "stroke": {
+                    "id": "st",
+                    "author": "human",
+                    "color": "#000000",
+                    "points": []
+                },
+                "index": 0
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(CanvasOp::SetImage {
+                sheet: "s".into(),
                 image: ImagePlacement {
                     id: "img".into(),
                     x: 1.0,
                     y: 2.0,
                     width: 3.0,
-                    height: 4.0,
-                },
-            },
-        };
-        assert_eq!(
-            serde_json::to_value(&message).unwrap(),
-            serde_json::json!({
-                "type": "op",
-                "op": {
-                    "type": "setImage",
-                    "image": { "id": "img", "x": 1.0, "y": 2.0, "width": 3.0, "height": 4.0 }
+                    height: 4.0
                 }
+            })
+            .unwrap(),
+            serde_json::json!({
+                "type": "setImage",
+                "sheet": "s",
+                "image": { "id": "img", "x": 1.0, "y": 2.0, "width": 3.0, "height": 4.0 }
             })
         );
         assert_eq!(
-            serde_json::to_value(CanvasOp::RemoveImage).unwrap(),
-            serde_json::json!({ "type": "removeImage" })
+            serde_json::to_value(CanvasOp::RemoveImage { sheet: "s".into() }).unwrap(),
+            serde_json::json!({ "type": "removeImage", "sheet": "s" })
         );
-
-        // Snapshots from pages before images were introduced still parse
-        let snapshot: ServerMessage = serde_json::from_value(serde_json::json!({
-            "type": "snapshot",
-            "strokes": []
-        }))
-        .unwrap();
-        let ServerMessage::Snapshot { image, .. } = snapshot else {
-            panic!("snapshot のはず");
-        };
-        assert_eq!(image, None);
 
         assert_eq!(
             serde_json::to_value(ImageStream::Request { id: "img".into() }).unwrap(),
@@ -263,15 +343,75 @@ mod tests {
     }
 
     #[test]
+    fn hello_without_protocol_is_zero() {
+        let message: ClientMessage = serde_json::from_value(serde_json::json!({
+            "type": "hello",
+            "token": "t",
+            "viewport": { "width": 800.0, "height": 600.0 }
+        }))
+        .unwrap();
+        let ClientMessage::Hello { protocol, .. } = message else {
+            panic!("hello のはず");
+        };
+        assert_eq!(protocol, 0);
+    }
+
+    /// Same shape as `CanvasOp` of old bridges (up to v0.3.0, before sheets).
+    /// Only checks that it can be read, so the fields' contents are not read
+    #[allow(dead_code)]
+    #[derive(Debug, Deserialize)]
+    #[serde(tag = "type", rename_all = "camelCase")]
+    enum OldCanvasOp {
+        Insert { stroke: Stroke, index: usize },
+        Remove { ids: Vec<String> },
+        Replace { stroke: Stroke },
+        SetImage { image: ImagePlacement },
+        RemoveImage,
+    }
+
+    /// Old bridges skip the unknown field (`sheet`) and can read new pages' ops
+    #[test]
+    fn old_bridge_reads_new_ops() {
+        let insert: OldCanvasOp = serde_json::from_value(
+            serde_json::to_value(CanvasOp::Insert {
+                sheet: INITIAL_SHEET_ID.into(),
+                stroke: Stroke {
+                    id: "st".into(),
+                    author: Author::Human,
+                    color: color::BLACK.into(),
+                    points: vec![],
+                },
+                index: 0,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(insert, OldCanvasOp::Insert { index: 0, .. }));
+
+        let remove_image: OldCanvasOp = serde_json::from_value(
+            serde_json::to_value(CanvasOp::RemoveImage {
+                sheet: INITIAL_SHEET_ID.into(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(remove_image, OldCanvasOp::RemoveImage));
+    }
+
+    #[test]
     fn messages_use_camel_case_type_tags() {
         let message = ServerMessage::Op {
             op: CanvasOp::Remove {
+                sheet: "s".into(),
                 ids: vec!["a".into()],
             },
         };
         assert_eq!(
             serde_json::to_value(&message).unwrap(),
-            serde_json::json!({ "type": "op", "op": { "type": "remove", "ids": ["a"] } })
+            serde_json::json!({
+                "type": "op",
+                "op": { "type": "remove", "sheet": "s", "ids": ["a"] }
+            })
         );
         assert_eq!(
             serde_json::to_value(ServerMessage::AwaitingApproval).unwrap(),

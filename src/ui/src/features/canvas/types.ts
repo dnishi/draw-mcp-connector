@@ -32,3 +32,20 @@ export interface History {
   undo: () => void;
   redo: () => void;
 }
+
+/** Switching and deleting sheets */
+export interface SheetControls {
+  /** Number of the current sheet (from 1) */
+  number: number;
+  count: number;
+  /** Go to the previous sheet. null on the first sheet */
+  previous: (() => void) | null;
+  /** Go to the next sheet. null on the last sheet */
+  next: (() => void) | null;
+  /** Makes a new sheet right after the current one and switches to it. null at the limit */
+  add: (() => void) | null;
+  /** Removes the current sheet. null when there is one sheet */
+  remove: (() => void) | null;
+  /** Removes all sheets, leaving one blank sheet */
+  removeAll: () => void;
+}

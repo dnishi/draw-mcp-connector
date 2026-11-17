@@ -405,6 +405,8 @@ pub fn run(app: Arc<App>, start: impl FnOnce()) -> ! {
                 crate::about::show();
             }
             Event::UserEvent(UserEvent::Menu(event)) if event.id == *items.quit.id() => {
+                // Write the current state right away before quitting
+                app.save_now();
                 qr_window.take();
                 indicator.take();
                 *control_flow = ControlFlow::Exit;

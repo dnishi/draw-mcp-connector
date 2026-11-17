@@ -6,37 +6,19 @@ import { SendToAiButton } from './SendToAiButton';
 describe('SendToAiButton', () => {
   it('押すと onSend が呼ばれる', async () => {
     const onSend = vi.fn();
-    render(<SendToAiButton onSend={onSend} queued={false} />);
+    render(<SendToAiButton onSend={onSend} />);
 
     await userEvent.click(screen.getByRole('button', { name: 'Send to AI' }));
 
     expect(onSend).toHaveBeenCalledOnce();
   });
 
-  it('onSend が null なら押せない', () => {
-    render(<SendToAiButton onSend={null} queued={false} />);
-
-    expect(screen.getByRole('button', { name: 'Send to AI' })).toBeDisabled();
-  });
-
-  it('queued なら名前が変わり点が出る', () => {
-    render(<SendToAiButton onSend={vi.fn()} queued />);
-    const button = screen.getByRole('button', {
-      name: 'Send to AI. Sent, waiting for the AI to read it',
-    });
-
-    expect(button).not.toBeDisabled();
-    expect(button).toHaveAttribute(
-      'title',
-      'Send to AI. Sent, waiting for the AI to read it',
-    );
-    expect(button.querySelector('span.bg-primary')).toBeInTheDocument();
-  });
-
-  it('queued でなければ点は出ない', () => {
-    render(<SendToAiButton onSend={vi.fn()} queued={false} />);
+  it('onSend が null なら押せず、ほかのボタンの押せないときより薄い', () => {
+    render(<SendToAiButton onSend={null} />);
     const button = screen.getByRole('button', { name: 'Send to AI' });
 
-    expect(button.querySelector('span.bg-primary')).toBeNull();
+    expect(button).toBeDisabled();
+    expect(button).toHaveClass('disabled:opacity-25');
+    expect(button).not.toHaveClass('disabled:opacity-50');
   });
 });

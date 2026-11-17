@@ -3,12 +3,14 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { BridgeConnection, BridgeHandlers } from './bridgeClient';
 import { connectBridge } from './bridgeClient';
 import type { ConnectionInfo } from './connectionInfo';
-import type {
-  CanvasOp,
-  ClientMessage,
-  ImagePlacement,
-  ServerMessage,
-  Viewport,
+import {
+  type CanvasOp,
+  type ClientMessage,
+  type ImagePlacement,
+  INITIAL_SHEET_ID,
+  PROTOCOL_VERSION,
+  type ServerMessage,
+  type Viewport,
 } from './protocol';
 import { RESUME_KEY_STORAGE_KEY } from './resumeKey';
 import type { ImageBytes } from './useBridgeSync';
@@ -53,7 +55,14 @@ beforeEach(() => {
 });
 
 const viewport = (x = 0): Viewport => ({ x, y: 0, width: 800, height: 600 });
-/** Passes the same object on rerender to show that the area has not changed */
+const placement: ImagePlacement = {
+  id: 'img',
+  x: 1,
+  y: 2,
+  width: 30,
+  height: 20,
+};
+/** Pass the same object on rerender to show that the area did not change */
 const unchanged = viewport();
 const page = { width: 800, height: 600 };
 
@@ -76,22 +85,41 @@ function setup(outgoing: readonly CanvasOp[] = []) {
 
 const receive = (message: ServerMessage) =>
   act(() => handlers.onMessage(message));
+/** The snapshot shape of bridges up to v0.3.0 (not part of the current ServerMessage type) */
+const legacySnapshot = (image?: ImagePlacement | null): ServerMessage =>
+  ({ type: 'snapshot', strokes: [], image }) as unknown as ServerMessage;
 
 describe('useBridgeSync', () => {
   it('hello を送り、許可されたら同期を始める', async () => {
     const { result, rerender, applyRemote } = setup();
     expect(result.current.status).toBe('connecting');
     await waitFor(() => expect(sent).toHaveLength(1));
-    expect(sent[0]).toMatchObject({ type: 'hello', token: 'token' });
+    expect(sent[0]).toMatchObject({
+      type: 'hello',
+      token: 'token',
+      protocol: PROTOCOL_VERSION,
+    });
 
     await receive({ type: 'awaitingApproval' });
     expect(result.current.status).toBe('waiting');
 
-    await receive({ type: 'snapshot', strokes: [] });
+    await receive({
+      type: 'snapshot',
+      sheets: [],
+      current: INITIAL_SHEET_ID,
+    });
     expect(result.current.status).toBe('connected');
-    expect(applyRemote).toHaveBeenCalledWith({ type: 'snapshot', strokes: [] });
+    expect(applyRemote).toHaveBeenCalledWith({
+      type: 'snapshot',
+      sheets: [],
+      current: INITIAL_SHEET_ID,
+    });
 
-    const op: CanvasOp = { type: 'remove', ids: ['a'] };
+    const op: CanvasOp = {
+      type: 'remove',
+      sheet: INITIAL_SHEET_ID,
+      ids: ['a'],
+    };
     rerender({ outgoing: [op], viewport: unchanged });
     expect(sent.at(-1)).toEqual({ type: 'op', op });
   });
@@ -104,7 +132,7 @@ describe('useBridgeSync', () => {
       viewport: unchanged,
       page,
     });
-    await receive({ type: 'snapshot', strokes: [] });
+    await receive({ type: 'snapshot', sheets: [], current: INITIAL_SHEET_ID });
 
     rerender({ outgoing: [], viewport: viewport(120) });
 
@@ -119,7 +147,7 @@ describe('useBridgeSync', () => {
     const { rerender } = setup();
     await waitFor(() => expect(sent).toHaveLength(1));
     rerender({
-      outgoing: [{ type: 'remove', ids: ['a'] }],
+      outgoing: [{ type: 'remove', sheet: INITIAL_SHEET_ID, ids: ['a'] }],
       viewport: unchanged,
     });
     expect(sent).toHaveLength(1);
@@ -138,7 +166,7 @@ describe('useBridgeSync', () => {
   it('切れた後に繋ぎ直せる', async () => {
     const { result } = setup();
     await waitFor(() => expect(sent).toHaveLength(1));
-    await receive({ type: 'snapshot', strokes: [] });
+    await receive({ type: 'snapshot', sheets: [], current: INITIAL_SHEET_ID });
     expect(result.current.reconnect).toBeNull();
 
     act(() => handlers.onClose());
@@ -152,7 +180,7 @@ describe('useBridgeSync', () => {
     await waitFor(() => expect(hellos()).toHaveLength(2));
     expect(hellos()[1]).toMatchObject({ token: 'token' });
 
-    await receive({ type: 'snapshot', strokes: [] });
+    await receive({ type: 'snapshot', sheets: [], current: INITIAL_SHEET_ID });
     expect(result.current.status).toBe('connected');
   });
 
@@ -162,7 +190,7 @@ describe('useBridgeSync', () => {
     expect(sent[0]).toMatchObject({ type: 'hello', resume: null });
 
     await receive({ type: 'resumeKey', key: 'key-1' });
-    await receive({ type: 'snapshot', strokes: [] });
+    await receive({ type: 'snapshot', sheets: [], current: INITIAL_SHEET_ID });
     expect(sessionStorage.getItem(RESUME_KEY_STORAGE_KEY)).toBe('key-1');
 
     act(() => handlers.onClose());
@@ -175,7 +203,7 @@ describe('useBridgeSync', () => {
   it('別のページがこのページの鍵で繋ぎ直したら、切れたことを知らせる', async () => {
     const { result } = setup();
     await waitFor(() => expect(sent).toHaveLength(1));
-    await receive({ type: 'snapshot', strokes: [] });
+    await receive({ type: 'snapshot', sheets: [], current: INITIAL_SHEET_ID });
 
     await receive({ type: 'superseded' });
     act(() => handlers.onClose());
@@ -191,7 +219,7 @@ describe('useBridgeSync', () => {
   it('PC 側で切られたら、状態の文に出す', async () => {
     const { result } = setup();
     await waitFor(() => expect(sent).toHaveLength(1));
-    await receive({ type: 'snapshot', strokes: [] });
+    await receive({ type: 'snapshot', sheets: [], current: INITIAL_SHEET_ID });
 
     await receive({ type: 'disconnected' });
     act(() => handlers.onClose());
@@ -201,44 +229,44 @@ describe('useBridgeSync', () => {
     expect(result.current.reconnect).not.toBeNull();
   });
 
-  it('aiStatus を受け取るまで sendToAi は使えず、受け取ると { type: "sendToAi" } を送る', async () => {
+  it('aiStatus を受け取るまで sendToAi は使えず、AI が待っているときだけ { type: "sendToAi" } を送る', async () => {
     const { result } = setup();
     await waitFor(() => expect(sent).toHaveLength(1));
 
-    await receive({ type: 'snapshot', strokes: [] });
+    await receive({ type: 'snapshot', sheets: [], current: INITIAL_SHEET_ID });
     expect(result.current.status).toBe('connected');
     expect(result.current.sendToAi).toBeNull();
 
     await receive({ type: 'aiStatus', waiting: false, queued: false });
+    expect(result.current.sendToAi).toBeNull();
+
+    await receive({ type: 'aiStatus', waiting: true, queued: false });
     expect(result.current.sendToAi).not.toBeNull();
     act(() => result.current.sendToAi?.());
     expect(sent.at(-1)).toEqual({ type: 'sendToAi' });
   });
 
-  it('aiStatus の waiting・queued が aiWaiting・sendQueued に出る', async () => {
+  it('AI が待たなくなったら sendToAi が null に戻る', async () => {
     const { result } = setup();
     await waitFor(() => expect(sent).toHaveLength(1));
-    await receive({ type: 'snapshot', strokes: [] });
+    await receive({ type: 'snapshot', sheets: [], current: INITIAL_SHEET_ID });
 
-    await receive({ type: 'aiStatus', waiting: true, queued: true });
-    expect(result.current.aiWaiting).toBe(true);
-    expect(result.current.sendQueued).toBe(true);
+    await receive({ type: 'aiStatus', waiting: true, queued: false });
+    expect(result.current.sendToAi).not.toBeNull();
 
     await receive({ type: 'aiStatus', waiting: false, queued: false });
-    expect(result.current.aiWaiting).toBe(false);
-    expect(result.current.sendQueued).toBe(false);
+    expect(result.current.sendToAi).toBeNull();
   });
 
-  it('切れたら aiWaiting・sendQueued が false、sendToAi が null になる', async () => {
+  it('切れたら sendToAi が null になる', async () => {
     const { result } = setup();
     await waitFor(() => expect(sent).toHaveLength(1));
-    await receive({ type: 'snapshot', strokes: [] });
-    await receive({ type: 'aiStatus', waiting: true, queued: true });
+    await receive({ type: 'snapshot', sheets: [], current: INITIAL_SHEET_ID });
+    await receive({ type: 'aiStatus', waiting: true, queued: false });
+    expect(result.current.sendToAi).not.toBeNull();
 
     act(() => handlers.onClose());
     expect(result.current.status).toBe('disconnected');
-    expect(result.current.aiWaiting).toBe(false);
-    expect(result.current.sendQueued).toBe(false);
     expect(result.current.sendToAi).toBeNull();
   });
 
@@ -258,64 +286,155 @@ describe('useBridgeSync', () => {
     expect(result.current.reconnect).toBeNull();
   });
 
-  describe('画像のバイト列(JSON とは別のストリーム)', () => {
-    const placement: ImagePlacement = {
-      id: 'img',
-      x: 1,
-      y: 2,
-      width: 30,
-      height: 20,
-    };
+  it('sheets のある snapshot で snapshot が、無い snapshot で legacySnapshot が渡り、singleSheet が true になる', async () => {
+    const { result, applyRemote } = setup();
+    await waitFor(() => expect(sent).toHaveLength(1));
 
+    await receive({
+      type: 'snapshot',
+      sheets: [],
+      current: INITIAL_SHEET_ID,
+    });
+    expect(applyRemote).toHaveBeenCalledWith({
+      type: 'snapshot',
+      sheets: [],
+      current: INITIAL_SHEET_ID,
+    });
+    expect(result.current.singleSheet).toBe(false);
+
+    // Back to false on disconnect
+    act(() => handlers.onClose());
+    expect(result.current.singleSheet).toBe(false);
+
+    act(() => result.current.reconnect?.());
+    const hellos = () => sent.filter(({ type }) => type === 'hello');
+    await waitFor(() => expect(hellos()).toHaveLength(2));
+
+    await receive(legacySnapshot());
+    expect(applyRemote).toHaveBeenCalledWith({
+      type: 'legacySnapshot',
+      strokes: [],
+      image: undefined,
+    });
+    expect(result.current.singleSheet).toBe(true);
+  });
+
+  it('古い bridge には紙の変更を送らない(筆跡の変更は送る)', async () => {
+    const { rerender } = setup();
+    await waitFor(() => expect(sent).toHaveLength(1));
+    await receive(legacySnapshot());
+
+    rerender({
+      outgoing: [
+        { type: 'remove', sheet: INITIAL_SHEET_ID, ids: ['a'] },
+        { type: 'addSheet', id: 's2', index: 1 },
+        { type: 'selectSheet', id: 's2' },
+        { type: 'removeSheet', id: 's2' },
+        { type: 'resetSheets' },
+      ],
+      viewport: unchanged,
+    });
+
+    expect(sent.filter((message) => message.type === 'op')).toEqual([
+      {
+        type: 'op',
+        op: { type: 'remove', sheet: INITIAL_SHEET_ID, ids: ['a'] },
+      },
+    ]);
+  });
+
+  it('置かれている画像のバイト列は、どの紙のものでも求める', async () => {
+    setup();
+    await waitFor(() => expect(sent).toHaveLength(1));
+
+    await receive({
+      type: 'snapshot',
+      sheets: [
+        { id: INITIAL_SHEET_ID, strokes: [], image: placement },
+        {
+          id: 's2',
+          strokes: [],
+          image: { ...placement, id: 'img2' },
+        },
+      ],
+      current: 's2',
+    });
+
+    expect(requestedImages).toEqual(['img', 'img2']);
+  });
+
+  describe('画像のバイト列(JSON とは別のストリーム)', () => {
     it('自分の setImage は、先にバイト列を一方向ストリームで送る', async () => {
       const { rerender } = setup();
       await waitFor(() => expect(sent).toHaveLength(1));
-      await receive({ type: 'snapshot', strokes: [] });
+      await receive({
+        type: 'snapshot',
+        sheets: [],
+        current: INITIAL_SHEET_ID,
+      });
       imageStore.seed('img', new Uint8Array([1, 2, 3]));
 
       rerender({
-        outgoing: [{ type: 'setImage', image: placement }],
+        outgoing: [
+          { type: 'setImage', sheet: INITIAL_SHEET_ID, image: placement },
+        ],
         viewport: unchanged,
       });
 
       expect(sentImageBytes).toEqual([['img', new Uint8Array([1, 2, 3])]]);
       expect(sent.at(-1)).toEqual({
         type: 'op',
-        op: { type: 'setImage', image: placement },
+        op: { type: 'setImage', sheet: INITIAL_SHEET_ID, image: placement },
       });
     });
 
     it('同じ画像を動かしても、バイト列は最初の1回だけ送る', async () => {
       const { rerender } = setup();
       await waitFor(() => expect(sent).toHaveLength(1));
-      await receive({ type: 'snapshot', strokes: [] });
+      await receive({
+        type: 'snapshot',
+        sheets: [],
+        current: INITIAL_SHEET_ID,
+      });
       imageStore.seed('img', new Uint8Array([1, 2, 3]));
       const moved = { ...placement, x: 50 };
 
       rerender({
-        outgoing: [{ type: 'setImage', image: placement }],
+        outgoing: [
+          { type: 'setImage', sheet: INITIAL_SHEET_ID, image: placement },
+        ],
         viewport: unchanged,
       });
       rerender({
-        outgoing: [{ type: 'setImage', image: moved }],
+        outgoing: [{ type: 'setImage', sheet: INITIAL_SHEET_ID, image: moved }],
         viewport: unchanged,
       });
 
       expect(sentImageBytes).toHaveLength(1);
       expect(sent.at(-1)).toEqual({
         type: 'op',
-        op: { type: 'setImage', image: moved },
+        op: { type: 'setImage', sheet: INITIAL_SHEET_ID, image: moved },
       });
     });
 
     it('bridge から受け取った画像は、動かしてもバイト列を送らない', async () => {
       const { rerender } = setup();
       await waitFor(() => expect(sent).toHaveLength(1));
-      await receive({ type: 'snapshot', strokes: [], image: placement });
+      await receive({
+        type: 'snapshot',
+        sheets: [{ id: INITIAL_SHEET_ID, strokes: [], image: placement }],
+        current: INITIAL_SHEET_ID,
+      });
       act(() => handlers.onImageBytes('img', new Uint8Array([4])));
 
       rerender({
-        outgoing: [{ type: 'setImage', image: { ...placement, x: 50 } }],
+        outgoing: [
+          {
+            type: 'setImage',
+            sheet: INITIAL_SHEET_ID,
+            image: { ...placement, x: 50 },
+          },
+        ],
         viewport: unchanged,
       });
 
@@ -325,7 +444,11 @@ describe('useBridgeSync', () => {
     it('bridge に求められたら、持っているバイト列を送る', async () => {
       setup();
       await waitFor(() => expect(sent).toHaveLength(1));
-      await receive({ type: 'snapshot', strokes: [] });
+      await receive({
+        type: 'snapshot',
+        sheets: [],
+        current: INITIAL_SHEET_ID,
+      });
       imageStore.seed('img', new Uint8Array([5]));
 
       act(() => handlers.onImageRequest('img'));
@@ -338,12 +461,16 @@ describe('useBridgeSync', () => {
       const { applyRemote } = setup();
       await waitFor(() => expect(sent).toHaveLength(1));
 
-      await receive({ type: 'snapshot', strokes: [], image: placement });
+      await receive({
+        type: 'snapshot',
+        sheets: [{ id: INITIAL_SHEET_ID, strokes: [], image: placement }],
+        current: INITIAL_SHEET_ID,
+      });
 
       expect(applyRemote).toHaveBeenCalledWith({
         type: 'snapshot',
-        strokes: [],
-        image: placement,
+        sheets: [{ id: INITIAL_SHEET_ID, strokes: [], image: placement }],
+        current: INITIAL_SHEET_ID,
       });
       expect(requestedImages).toEqual(['img']);
     });
@@ -351,13 +478,20 @@ describe('useBridgeSync', () => {
     it('他のページが置いた画像のバイト列を知らなければ、求める', async () => {
       const { applyRemote } = setup();
       await waitFor(() => expect(sent).toHaveLength(1));
-      await receive({ type: 'snapshot', strokes: [] });
+      await receive({
+        type: 'snapshot',
+        sheets: [],
+        current: INITIAL_SHEET_ID,
+      });
 
-      await receive({ type: 'op', op: { type: 'setImage', image: placement } });
+      await receive({
+        type: 'op',
+        op: { type: 'setImage', sheet: INITIAL_SHEET_ID, image: placement },
+      });
 
       expect(applyRemote).toHaveBeenCalledWith({
         type: 'remote',
-        op: { type: 'setImage', image: placement },
+        op: { type: 'setImage', sheet: INITIAL_SHEET_ID, image: placement },
       });
       expect(requestedImages).toEqual(['img']);
     });
@@ -365,10 +499,17 @@ describe('useBridgeSync', () => {
     it('知っている画像は求めず、受け取ったバイト列は保管する', async () => {
       setup();
       await waitFor(() => expect(sent).toHaveLength(1));
-      await receive({ type: 'snapshot', strokes: [] });
+      await receive({
+        type: 'snapshot',
+        sheets: [],
+        current: INITIAL_SHEET_ID,
+      });
       imageStore.seed('img', new Uint8Array([9]));
 
-      await receive({ type: 'op', op: { type: 'setImage', image: placement } });
+      await receive({
+        type: 'op',
+        op: { type: 'setImage', sheet: INITIAL_SHEET_ID, image: placement },
+      });
       expect(requestedImages).toEqual([]);
 
       act(() => handlers.onImageBytes('img2', new Uint8Array([7, 8])));

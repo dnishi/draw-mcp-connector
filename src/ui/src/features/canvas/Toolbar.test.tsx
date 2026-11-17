@@ -456,9 +456,9 @@ describe('Toolbar', () => {
 
       await userEvent.click(clearButton());
       const dialog = await screen.findByRole('alertdialog');
-      expect(dialog).toHaveTextContent('Clear the canvas?');
+      expect(dialog).toHaveTextContent('Clear this sheet?');
       expect(dialog).toHaveTextContent(
-        "All strokes and the image will be erased. You can't undo this action.",
+        "All strokes and the image on this sheet will be erased. You can't undo this action.",
       );
       expect(onClear).not.toHaveBeenCalled();
 

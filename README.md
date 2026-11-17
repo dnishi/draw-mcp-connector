@@ -39,6 +39,22 @@ Choose "Open Canvas" from the Draw MCP Connector icon in the menu bar to open th
 
 With the MCP tool `draw_shapes`, AI agents can draw polylines, rectangles, ellipses, and text on the canvas. Sending shapes and strings instead of point lists keeps the AI's token usage low. What the AI draws becomes ordinary strokes on the canvas, just like handwriting.
 
+## Saving the canvas
+
+The PC app saves your sheets, strokes, and imported images automatically, and they stay after you quit or restart the PC app (there is no save action). Nothing is saved in the canvas page (the browser). The data is saved here:
+
+- macOS: `~/Library/Application Support/draw-mcp-connector/`
+- Windows: `%LOCALAPPDATA%\draw-mcp-connector\`
+
+What you erase with Clear, Delete Sheet, or Delete All Sheets is also removed from the saved files.
+
+## Uninstalling the PC app
+
+Deleting the app leaves the saved canvas and the first-launch record behind (reinstalling brings the previous canvas back). To remove everything, quit the PC app and also delete these folders:
+
+- macOS: `~/Library/Application Support/draw-mcp-connector/`
+- Windows: `%LOCALAPPDATA%\draw-mcp-connector\` and `%APPDATA%\draw-mcp-connector\`
+
 ## Building from source
 
 The PC app (`src/bridge`) embeds the `BRIDGE_CANVAS_URL` environment variable at build time as the canvas page opened by the QR code and "Open Canvas". To use a canvas page you host yourself (HTTPS), specify its URL.

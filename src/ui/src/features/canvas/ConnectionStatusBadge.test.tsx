@@ -35,30 +35,7 @@ describe('ConnectionStatusBadge', () => {
     expect(icon()).not.toHaveClass('text-[#34c759]');
   });
 
-  it('接続中で AI が待っているときは「Connected. AI is waiting」で、アイコンを明滅させる', () => {
-    render(<ConnectionStatusBadge status="connected" aiWaiting />);
-    const status = screen.getByRole('status');
-
-    expect(status).toHaveAttribute('title', 'Connected. AI is waiting');
-    expect(within(status).getByText('Connected. AI is waiting')).toHaveClass(
-      'sr-only',
-    );
-    expect(status.querySelector('svg')).toHaveClass(
-      'motion-safe:animate-pulse',
-    );
-  });
-
-  it('接続中でなければ、aiWaiting でも明滅させない', () => {
-    render(<ConnectionStatusBadge status="disconnected" aiWaiting />);
-    const status = screen.getByRole('status');
-
-    expect(status).toHaveAttribute('title', 'Not Connected');
-    expect(status.querySelector('svg')).not.toHaveClass(
-      'motion-safe:animate-pulse',
-    );
-  });
-
-  it('aiWaiting が無ければ従来通り', () => {
+  it('接続中でも、アイコンを明滅させない', () => {
     render(<ConnectionStatusBadge status="connected" />);
     const status = screen.getByRole('status');
 

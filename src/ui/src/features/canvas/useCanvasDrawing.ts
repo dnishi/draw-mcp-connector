@@ -20,13 +20,14 @@ import {
 import { newStrokeId } from './strokeId';
 import { buildSceneVertices } from './strokeMesh';
 import {
+  currentSheet,
   initialStrokeHistory,
   strokeHistoryReducer,
   type ErasedPieces,
   type RemoteAction,
 } from './strokeHistory';
-import type { ImagePlacement } from '../sync/protocol';
-import type { EraserMode, History, ToolSettings } from './types';
+import { type ImagePlacement, MAX_SHEETS } from '../sync/protocol';
+import type { EraserMode, History, SheetControls, ToolSettings } from './types';
 import { useStrokeRenderer } from './useStrokeRenderer';
 import {
   INITIAL_VIEW,
@@ -162,9 +163,13 @@ export function useCanvasDrawing(
     strokeHistoryReducer,
     initialStrokeHistory,
   );
+  // The current sheet (strokes, image, and history are per sheet)
+  const sheet = currentSheet(state);
+  const strokes = sheet.strokes;
+  const image = sheet.image;
 
-  const strokesRef = useRef(state.strokes);
-  const imageRef = useRef(state.image);
+  const strokesRef = useRef(strokes);
+  const imageRef = useRef(image);
   const gestureRef = useRef<Gesture | null>(null);
   const frameRef = useRef(0);
   /** Circle showing the eraser size while tracing to erase */
@@ -232,33 +237,35 @@ export function useCanvasDrawing(
   useEffect(() => () => cancelAnimationFrame(frameRef.current), []);
 
   useEffect(() => {
-    strokesRef.current = state.strokes;
-    imageRef.current = state.image;
+    strokesRef.current = strokes;
+    imageRef.current = image;
     requestRender();
-  }, [state.strokes, state.image, requestRender]);
+  }, [strokes, image, requestRender]);
 
-  // Keep only images that may be shown (the one placed now and those undo/
-  // redo can bring back). Clearing empties the history, so all images are discarded
+  // Keep only images that may be shown (those placed now on any sheet, and those
+  // undo or redo can bring back). Wiping a sheet empties its history, so its images are dropped
   useEffect(() => {
     const alive = new Set<string>();
-    if (state.image) {
-      alive.add(state.image.id);
-    }
-    for (const stack of [state.undoStack, state.redoStack]) {
-      for (const op of stack) {
-        if (op.type !== 'image') {
-          continue;
-        }
-        if (op.before) {
-          alive.add(op.before.id);
-        }
-        if (op.after) {
-          alive.add(op.after.id);
+    for (const sheet of state.sheets) {
+      if (sheet.image) {
+        alive.add(sheet.image.id);
+      }
+      for (const stack of [sheet.undoStack, sheet.redoStack]) {
+        for (const op of stack) {
+          if (op.type !== 'image') {
+            continue;
+          }
+          if (op.before) {
+            alive.add(op.before.id);
+          }
+          if (op.after) {
+            alive.add(op.after.id);
+          }
         }
       }
     }
     images.retain(alive);
-  }, [state.image, state.undoStack, state.redoStack, images]);
+  }, [state.sheets, images]);
 
   useEffect(() => {
     imageMoveRef.current = imageMove;
@@ -304,7 +311,26 @@ export function useCanvasDrawing(
     [requestRender],
   );
 
-  // When the canvas element's size (= paper size) changes, fit the visible area inside the new paper
+  // When the current sheet changes (switched on this page or by a switch from the PC),
+  // cancel any stroke, erasing, or image move in progress, and reset the view to 100%
+  const currentSheetId = state.current;
+  const previousSheetIdRef = useRef(currentSheetId);
+  useEffect(() => {
+    if (previousSheetIdRef.current === currentSheetId) {
+      return;
+    }
+    previousSheetIdRef.current = currentSheetId;
+    gestureRef.current = null;
+    imageGestureRef.current = null;
+    imagePinchRef.current = null;
+    if (eraserCursorRef.current) {
+      eraserCursorRef.current.hidden = true;
+    }
+    commitView(INITIAL_VIEW);
+    requestRender();
+  }, [currentSheetId, commitView, requestRender]);
+
+  // When the screen size (= the paper size) changes, fit the visible area inside the new paper again
   useEffect(() => {
     pageRef.current = page;
     commitView(clampView(viewRef.current, page));
@@ -718,8 +744,8 @@ export function useCanvasDrawing(
   const applyRemote: (action: RemoteAction) => void = dispatch;
 
   const history: History = {
-    canUndo: state.undoStack.length > 0,
-    canRedo: state.redoStack.length > 0,
+    canUndo: sheet.undoStack.length > 0,
+    canRedo: sheet.redoStack.length > 0,
     undo: () => dispatch({ type: 'undo' }),
     redo: () => dispatch({ type: 'redo' }),
   };
@@ -730,24 +756,56 @@ export function useCanvasDrawing(
     [view, page],
   );
 
+  const sheetIndex = state.sheets.findIndex(({ id }) => id === state.current);
+  /** Switching and deleting sheets */
+  const sheetControls: SheetControls = {
+    number: sheetIndex + 1,
+    count: state.sheets.length,
+    previous:
+      sheetIndex > 0
+        ? () =>
+            dispatch({
+              type: 'selectSheet',
+              id: state.sheets[sheetIndex - 1].id,
+            })
+        : null,
+    next:
+      sheetIndex < state.sheets.length - 1
+        ? () =>
+            dispatch({
+              type: 'selectSheet',
+              id: state.sheets[sheetIndex + 1].id,
+            })
+        : null,
+    add:
+      state.sheets.length >= MAX_SHEETS
+        ? null
+        : () => dispatch({ type: 'newSheet', id: newStrokeId() }),
+    remove:
+      state.sheets.length > 1 ? () => dispatch({ type: 'removeSheet' }) : null,
+    removeAll: () => dispatch({ type: 'resetSheets' }),
+  };
+
   return {
     error,
     history,
     /** The committed view (excluding movement during a pinch) */
     view,
     resetView: () => commitView(INITIAL_VIEW),
-    /** Whether there is at least one stroke or a placed image (whether it can be cleared) */
-    canClear: state.strokes.length > 0 || state.image !== null,
-    /** Returns to a clean initial state: erases all strokes and the image (also sent to the PC), empties the history and resets the view to 100% */
+    /** Whether the current sheet has any stroke or an image (whether it can be cleared) */
+    canClear: strokes.length > 0 || image !== null,
+    /** Wipes only the current sheet: removes its strokes and image (also sent to the PC), empties its history, and resets the view to 100% */
     clear: () => {
       dispatch({ type: 'clear' });
       commitView(INITIAL_VIEW);
     },
+    /** Switching and deleting sheets */
+    sheets: sheetControls,
     viewport,
     page,
-    /** The image laid under the strokes (one at most for now) */
-    image: state.image,
-    /** Adds, moves, resizes or deletes the image (null to delete). Goes into the undo history and is sent to the PC */
+    /** Image laid under the current sheet's strokes */
+    image,
+    /** Adds, moves, resizes, or removes (null) the image. Added to the undo history and sent to the PC */
     setImage: (image: ImagePlacement | null) =>
       dispatch({ type: 'image', image }),
     /** Moves only the display first (while the slider is moving). Committed with setImage on release */

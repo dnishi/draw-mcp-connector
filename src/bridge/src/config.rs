@@ -43,3 +43,6 @@ pub const WAIT_FOR_CANVAS_TIMEOUT: Duration = Duration::from_secs(50);
 /// How long the AI is still treated as waiting after wait_for_canvas returns without a press.
 /// Keeps the page's icon from stopping its pulsing and flickering in the few seconds until the AI calls again
 pub const AI_WAITING_GRACE: Duration = Duration::from_secs(15);
+
+/// How long to wait after a change before writing the file. Changes during the wait are written together
+pub const SAVE_DELAY: Duration = Duration::from_secs(1);

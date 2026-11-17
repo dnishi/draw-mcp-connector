@@ -11,7 +11,7 @@ use rmcp::model::{CallToolResult, ContentBlock};
 use serde::Serialize;
 
 use crate::canvas::{CanvasView, ChangesSince, Snapshot};
-use crate::protocol::{Author, CanvasOp, ImagePlacement, Stroke};
+use crate::protocol::{Author, CanvasOp, ImagePlacement, Sheet, Stroke};
 use crate::render::{self, Rect, StoredImage};
 
 /// Bounds in integer CSS pixels
@@ -86,47 +86,95 @@ impl From<&ImagePlacement> for PlacedImage {
 #[serde(tag = "type", rename_all = "camelCase")]
 enum OpSummary {
     Insert {
+        /// Number of the changed sheet (1-based, in order). Omitted if the sheet no longer exists
+        #[serde(skip_serializing_if = "Option::is_none")]
+        sheet: Option<usize>,
         stroke: StrokeSummary,
         index: usize,
     },
     Remove {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        sheet: Option<usize>,
         ids: Vec<String>,
     },
     Replace {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        sheet: Option<usize>,
         stroke: StrokeSummary,
     },
     /// Places, moves or resizes the image (always under the strokes)
     SetImage {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        sheet: Option<usize>,
         image: PlacedImage,
     },
     /// Removes the image
-    RemoveImage,
+    RemoveImage {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        sheet: Option<usize>,
+    },
+    /// Inserts an empty sheet
+    AddSheet {
+        /// Number of the inserted sheet. Omitted if it no longer exists
+        #[serde(skip_serializing_if = "Option::is_none")]
+        sheet: Option<usize>,
+    },
+    /// Removes a sheet with its contents
+    RemoveSheet,
+    /// Changes the current sheet
+    SelectSheet {
+        /// Number of the sheet switched to. Omitted if it no longer exists
+        #[serde(skip_serializing_if = "Option::is_none")]
+        sheet: Option<usize>,
+    },
+    /// Removes all sheets, leaving one blank sheet
+    ResetSheets,
 }
 
-impl From<&CanvasOp> for OpSummary {
-    fn from(op: &CanvasOp) -> Self {
-        match op {
-            CanvasOp::Insert { stroke, index } => Self::Insert {
-                stroke: stroke.into(),
-                index: *index,
-            },
-            CanvasOp::Remove { ids } => Self::Remove { ids: ids.clone() },
-            CanvasOp::Replace { stroke } => Self::Replace {
-                stroke: stroke.into(),
-            },
-            CanvasOp::SetImage { image } => Self::SetImage {
-                image: image.into(),
-            },
-            CanvasOp::RemoveImage => Self::RemoveImage,
-        }
+/// Summarizes one change. Sheet numbers are looked up from the current state, so
+/// changes to sheets that no longer exist have no sheet
+fn summarize(op: &CanvasOp, current: &Snapshot) -> OpSummary {
+    let number = |sheet: &str| current.sheet_number(sheet);
+    match op {
+        CanvasOp::Insert {
+            sheet,
+            stroke,
+            index,
+        } => OpSummary::Insert {
+            sheet: number(sheet),
+            stroke: stroke.into(),
+            index: *index,
+        },
+        CanvasOp::Remove { sheet, ids } => OpSummary::Remove {
+            sheet: number(sheet),
+            ids: ids.clone(),
+        },
+        CanvasOp::Replace { sheet, stroke } => OpSummary::Replace {
+            sheet: number(sheet),
+            stroke: stroke.into(),
+        },
+        CanvasOp::SetImage { sheet, image } => OpSummary::SetImage {
+            sheet: number(sheet),
+            image: image.into(),
+        },
+        CanvasOp::RemoveImage { sheet } => OpSummary::RemoveImage {
+            sheet: number(sheet),
+        },
+        CanvasOp::AddSheet { id, .. } => OpSummary::AddSheet { sheet: number(id) },
+        // The sheet is gone, so it has no number
+        CanvasOp::RemoveSheet { .. } => OpSummary::RemoveSheet,
+        CanvasOp::SelectSheet { id } => OpSummary::SelectSheet { sheet: number(id) },
+        CanvasOp::ResetSheets => OpSummary::ResetSheets,
     }
 }
 
-/// Which part of which canvas revision the accompanying image shows
+/// Which revision of the canvas, which sheet, and which area the accompanying image shows
 #[derive(Serialize)]
 struct ImageInfo {
     revision: u64,
-    /// The image's top left is canvas (x, y). width and height are canvas CSS pixels
+    /// Number of the sheet shown (1-based, in order)
+    sheet: usize,
+    /// The image's top left is (x, y) on the canvas. width and height are in canvas CSS pixels
     #[serde(flatten)]
     area: Rect,
     /// Image pixels per canvas CSS pixel
@@ -136,7 +184,15 @@ struct ImageInfo {
 #[derive(Serialize)]
 struct CanvasSummary {
     revision: u64,
-    /// Per connected canvas page: the paper size (the paper starts at (0, 0)) and the visible area
+    /// Number of the sheet in this result (1-based, in order)
+    sheet: usize,
+    /// Number of the sheet the user is viewing now
+    #[serde(rename = "currentSheet")]
+    current_sheet: usize,
+    /// Number of sheets
+    #[serde(rename = "sheetCount")]
+    sheet_count: usize,
+    /// For each connected canvas page, the paper size (paper starts at (0, 0)) and the visible area
     canvases: Vec<CanvasView>,
     /// No image is returned when there is nothing to draw
     image: Option<ImageInfo>,
@@ -153,8 +209,14 @@ struct CanvasSummary {
 enum ChangesSummary {
     Ops {
         revision: u64,
-        /// Pages connected at the time of the call and their visible areas. Visible-area changes do not bump
-        /// the revision, so they are always returned separately from the diff
+        /// Number of the sheet the user is viewing now
+        #[serde(rename = "currentSheet")]
+        current_sheet: usize,
+        /// Number of sheets
+        #[serde(rename = "sheetCount")]
+        sheet_count: usize,
+        /// Pages connected when called and their visible areas. Changes to the area do not raise the
+        /// revision, so they are always returned separately from the diff
         canvases: Vec<CanvasView>,
         ops: Vec<OpSummary>,
         /// No image is returned when nothing changed (the same image as last time is not sent)
@@ -164,11 +226,12 @@ enum ChangesSummary {
     Snapshot(CanvasSummary),
 }
 
-/// The canvas image. Returns (image description, PNG). data is the image of snapshot.image
-/// (without it the image is not passed to render, so it is neither drawn nor included in the area. The placement
-/// is passed in placedImage in the JSON)
+/// The canvas image. Returns (image description, PNG). data is the image of sheet.image
+/// (without it, the image is not passed to render, so it is neither drawn nor included in the area. Its
+/// placement is given as placedImage in the JSON)
 fn render_image(
     snapshot: &Snapshot,
+    sheet: &Sheet,
     data: Option<&StoredImage>,
 ) -> Result<Option<(ImageInfo, Vec<u8>)>, ErrorData> {
     // The whole paper and visible area of connected pages are captured even without strokes
@@ -191,15 +254,19 @@ fn render_image(
         .filter_map(|view| view.page)
         .map(Rect::from)
         .reduce(Rect::union);
-    let placed = match (&snapshot.image, data) {
+    // Shows that sheet's strokes and image
+    let placed = match (&sheet.image, data) {
         (Some(image), Some(stored)) => Some((image, stored)),
         _ => None,
     };
-    let image = render::render(&snapshot.strokes, &regions, placed, clip)
+    let image = render::render(&sheet.strokes, &regions, placed, clip)
         .map_err(|error| ErrorData::internal_error(format!("画像を作れない: {error}"), None))?;
     Ok(image.map(|image| {
         let info = ImageInfo {
             revision: snapshot.revision,
+            sheet: snapshot
+                .sheet_number(&sheet.id)
+                .expect("写す紙はスナップショットの中にある"),
             area: image.area,
             scale: image.scale,
         };
@@ -235,34 +302,42 @@ fn result_with_image(
 
 fn canvas_summary(
     snapshot: &Snapshot,
+    sheet: &Sheet,
     include_strokes: bool,
     data: Option<&StoredImage>,
 ) -> Result<(CanvasSummary, Option<Vec<u8>>), ErrorData> {
-    let (image, png) = render_image(snapshot, data)?.unzip();
+    let (image, png) = render_image(snapshot, sheet, data)?.unzip();
     let summary = CanvasSummary {
         revision: snapshot.revision,
+        sheet: snapshot
+            .sheet_number(&sheet.id)
+            .expect("読んだ紙はスナップショットの中にある"),
+        current_sheet: snapshot
+            .sheet_number(&snapshot.current)
+            .expect("今の紙は必ず存在する"),
+        sheet_count: snapshot.sheets.len(),
         canvases: snapshot.views.clone(),
         image,
-        placed_image: snapshot.image.as_ref().map(PlacedImage::from),
-        strokes: include_strokes
-            .then(|| snapshot.strokes.iter().map(StrokeSummary::from).collect()),
+        placed_image: sheet.image.as_ref().map(PlacedImage::from),
+        strokes: include_strokes.then(|| sheet.strokes.iter().map(StrokeSummary::from).collect()),
     };
     Ok((summary, png))
 }
 
-/// Returns a description of the whole canvas and its image. If include_strokes is false, omits the per-stroke list.
-/// data is the image of snapshot.image
+/// Returns the description and image of one sheet. If include_strokes is false, omits the per-stroke list.
+/// data is the image of sheet.image
 pub fn canvas_result(
     snapshot: &Snapshot,
+    sheet: &Sheet,
     include_strokes: bool,
     data: Option<&StoredImage>,
 ) -> Result<CallToolResult, ErrorData> {
-    let (summary, png) = canvas_summary(snapshot, include_strokes, data)?;
+    let (summary, png) = canvas_summary(snapshot, sheet, include_strokes, data)?;
     result_with_image(&summary, png)
 }
 
-/// Builds a description of the changes and the current canvas image. No image if nothing changed.
-/// data is the image of current.image
+/// Makes the diff's description and the image of the current sheet. No image if nothing changed.
+/// data is the image of the current sheet in current
 fn changes_summary(
     changes: &ChangesSince,
     current: &Snapshot,
@@ -270,23 +345,28 @@ fn changes_summary(
 ) -> Result<(ChangesSummary, Option<Vec<u8>>), ErrorData> {
     match changes {
         ChangesSince::Ops { revision, ops } => {
+            // When there are changes, the attached image is of the current sheet
             let (image, png) = if ops.is_empty() {
                 (None, None)
             } else {
-                render_image(current, data)?.unzip()
+                render_image(current, current.current_sheet(), data)?.unzip()
             };
             let summary = ChangesSummary::Ops {
                 revision: *revision,
+                current_sheet: current
+                    .sheet_number(&current.current)
+                    .expect("今の紙は必ず存在する"),
+                sheet_count: current.sheets.len(),
                 canvases: current.views.clone(),
-                ops: ops.iter().map(OpSummary::from).collect(),
+                ops: ops.iter().map(|op| summarize(op, current)).collect(),
                 image,
             };
             Ok((summary, png))
         }
         ChangesSince::Snapshot(snapshot) => {
-            // When the changes cannot be returned, return the whole canvas (it is the current state, so data can be used as is).
-            // It replaces the changes, so the stroke list is not omitted
-            let (summary, png) = canvas_summary(snapshot, true, data)?;
+            // When no diff is available, return the whole canvas (it is the current state, so data can be used as is).
+            // It replaces the diff, so the stroke list is not omitted. Returns the current sheet
+            let (summary, png) = canvas_summary(snapshot, snapshot.current_sheet(), true, data)?;
             Ok((ChangesSummary::Snapshot(summary), png))
         }
     }
@@ -365,7 +445,7 @@ fn base64(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{PageSize, StrokePoint, Viewport};
+    use crate::protocol::{INITIAL_SHEET_ID, PageSize, Sheet, StrokePoint, Viewport};
 
     fn stroke(id: &str) -> Stroke {
         Stroke {
@@ -402,12 +482,17 @@ mod tests {
         }
     }
 
-    fn snapshot() -> Snapshot {
+    /// Makes a Snapshot of one sheet (= `INITIAL_SHEET_ID`) from strokes and an image (shared by tests)
+    fn snapshot(strokes: Vec<Stroke>, image: Option<ImagePlacement>) -> Snapshot {
         Snapshot {
             revision: 4,
             views: vec![view(2, 30.0, 20.0)],
-            strokes: vec![stroke("a")],
-            image: None,
+            sheets: vec![Sheet {
+                id: INITIAL_SHEET_ID.into(),
+                strokes,
+                image,
+            }],
+            current: INITIAL_SHEET_ID.into(),
         }
     }
 
@@ -457,7 +542,8 @@ mod tests {
 
     #[test]
     fn canvas_result_has_summary_and_png_without_points() {
-        let result = canvas_result(&snapshot(), true, None).unwrap();
+        let snapped = snapshot(vec![stroke("a")], None);
+        let result = canvas_result(&snapped, snapped.current_sheet(), true, None).unwrap();
         assert_eq!(result.content.len(), 2);
         let image = result.content[1].as_image().unwrap();
         assert_eq!(image.mime_type, "image/png");
@@ -466,8 +552,11 @@ mod tests {
             summary_json(&result),
             serde_json::json!({
                 "revision": 4,
+                "sheet": 1,
+                "currentSheet": 1,
+                "sheetCount": 1,
                 "canvases": canvases_json(),
-                "image": { "revision": 4, "x": 0.0, "y": 0.0, "width": 30.0, "height": 20.0, "scale": 1.0 },
+                "image": { "revision": 4, "sheet": 1, "x": 0.0, "y": 0.0, "width": 30.0, "height": 20.0, "scale": 1.0 },
                 "strokes": [{
                     "id": "a",
                     "author": "ai",
@@ -476,6 +565,36 @@ mod tests {
                 }]
             })
         );
+    }
+
+    /// With two sheets, reading a sheet that is not current includes only that sheet's strokes,
+    /// and sheet is its number
+    #[test]
+    fn reading_a_sheet_other_than_the_current_one_returns_only_its_strokes() {
+        let mut two = snapshot(vec![stroke("a")], None);
+        two.sheets.push(Sheet {
+            id: "sheet-2".into(),
+            strokes: vec![stroke("b")],
+            image: None,
+        });
+        two.current = "sheet-2".into();
+        // Read the first sheet (the second is current)
+        let result = canvas_result(&two, &two.sheets[0], true, None).unwrap();
+        let json = summary_json(&result);
+        assert_eq!(json["sheet"], 1);
+        assert_eq!(json["currentSheet"], 2);
+        assert_eq!(json["sheetCount"], 2);
+        // Only the strokes of the sheet read ("b" on the second sheet is not included)
+        assert_eq!(
+            json["strokes"],
+            serde_json::json!([{
+                "id": "a",
+                "author": "ai",
+                "color": "#000000",
+                "bounds": { "x": 7, "y": 7, "width": 16, "height": 6 }
+            }])
+        );
+        assert_eq!(json["image"]["sheet"], 1);
     }
 
     #[test]
@@ -501,24 +620,21 @@ mod tests {
     /// With two devices of different sizes connected, shows the area containing both papers and returns both views
     #[test]
     fn every_connected_canvas_is_described_and_imaged() {
-        let both = Snapshot {
-            revision: 4,
-            views: vec![view(1, 30.0, 20.0), view(2, 50.0, 10.0)],
-            strokes: Vec::new(),
-            image: None,
-        };
-        let json = summary_json(&canvas_result(&both, true, None).unwrap());
+        let mut both = snapshot(Vec::new(), None);
+        both.views = vec![view(1, 30.0, 20.0), view(2, 50.0, 10.0)];
+        let json = summary_json(&canvas_result(&both, both.current_sheet(), true, None).unwrap());
         assert_eq!(json["canvases"].as_array().unwrap().len(), 2);
         assert_eq!(json["canvases"][1]["ip"], "192.168.0.2");
         assert_eq!(
             json["image"],
-            serde_json::json!({ "revision": 4, "x": 0.0, "y": 0.0, "width": 50.0, "height": 20.0, "scale": 1.0 })
+            serde_json::json!({ "revision": 4, "sheet": 1, "x": 0.0, "y": 0.0, "width": 50.0, "height": 20.0, "scale": 1.0 })
         );
     }
 
     #[test]
     fn strokes_can_be_omitted() {
-        let result = canvas_result(&snapshot(), false, None).unwrap();
+        let snapped = snapshot(vec![stroke("a")], None);
+        let result = canvas_result(&snapped, snapped.current_sheet(), false, None).unwrap();
         assert_eq!(result.content.len(), 2, "画像は返す");
         let json = summary_json(&result);
         assert!(json.get("strokes").is_none());
@@ -527,13 +643,10 @@ mod tests {
 
     #[test]
     fn empty_canvas_has_no_image() {
-        let empty = Snapshot {
-            revision: 0,
-            views: Vec::new(),
-            strokes: Vec::new(),
-            image: None,
-        };
-        let result = canvas_result(&empty, true, None).unwrap();
+        let mut empty = snapshot(Vec::new(), None);
+        empty.revision = 0;
+        empty.views.clear();
+        let result = canvas_result(&empty, empty.current_sheet(), true, None).unwrap();
         assert_eq!(result.content.len(), 1);
         assert_eq!(summary_json(&result)["image"], serde_json::Value::Null);
     }
@@ -544,25 +657,31 @@ mod tests {
             revision: 4,
             ops: vec![
                 CanvasOp::Insert {
+                    sheet: INITIAL_SHEET_ID.into(),
                     stroke: stroke("a"),
                     index: 0,
                 },
                 CanvasOp::Remove {
+                    sheet: INITIAL_SHEET_ID.into(),
                     ids: vec!["b".into()],
                 },
             ],
         };
-        let result = changes_result(&changes, &snapshot(), None).unwrap();
+        let result = changes_result(&changes, &snapshot(vec![stroke("a")], None), None).unwrap();
         let json = summary_json(&result);
         assert_eq!(json["kind"], "ops");
+        assert_eq!(json["currentSheet"], 1);
+        assert_eq!(json["sheetCount"], 1);
         assert_eq!(json["ops"][0]["type"], "insert");
+        assert_eq!(json["ops"][0]["sheet"], 1);
         assert_eq!(json["ops"][0]["stroke"]["id"], "a");
         assert!(json["ops"][0]["stroke"].get("points").is_none());
         assert_eq!(
             json["ops"][1],
-            serde_json::json!({ "type": "remove", "ids": ["b"] })
+            serde_json::json!({ "type": "remove", "sheet": 1, "ids": ["b"] })
         );
         assert_eq!(json["image"]["revision"], 4);
+        assert_eq!(json["image"]["sheet"], 1);
         assert_eq!(result.content.len(), 2);
     }
 
@@ -572,17 +691,101 @@ mod tests {
             revision: 4,
             ops: Vec::new(),
         };
-        let result = changes_result(&changes, &snapshot(), None).unwrap();
+        let result = changes_result(&changes, &snapshot(vec![stroke("a")], None), None).unwrap();
         assert_eq!(result.content.len(), 1, "画像は付けない");
         assert_eq!(
             summary_json(&result),
             serde_json::json!({
                 "kind": "ops",
                 "revision": 4,
+                "currentSheet": 1,
+                "sheetCount": 1,
                 "canvases": canvases_json(),
                 "ops": []
             })
         );
+    }
+
+    /// Diff summaries: stroke changes carry sheet, changes to removed sheets do not.
+    /// The shapes of the four sheet changes
+    #[test]
+    fn ops_carry_their_sheet_number_and_absent_sheets_are_omitted() {
+        let mut two = snapshot(vec![stroke("a")], None);
+        two.sheets.push(Sheet {
+            id: "sheet-2".into(),
+            strokes: Vec::new(),
+            image: None,
+        });
+        let changes = ChangesSince::Ops {
+            revision: 4,
+            ops: vec![
+                CanvasOp::Insert {
+                    sheet: INITIAL_SHEET_ID.into(),
+                    stroke: stroke("a"),
+                    index: 0,
+                },
+                CanvasOp::Remove {
+                    sheet: "sheet-2".into(),
+                    ids: vec!["b".into()],
+                },
+                // Changes to removed sheets have no number
+                CanvasOp::Remove {
+                    sheet: "gone".into(),
+                    ids: vec!["c".into()],
+                },
+                CanvasOp::AddSheet {
+                    id: "sheet-2".into(),
+                    index: 1,
+                },
+                CanvasOp::AddSheet {
+                    id: "gone".into(),
+                    index: 2,
+                },
+                CanvasOp::RemoveSheet { id: "gone".into() },
+                CanvasOp::SelectSheet {
+                    id: "sheet-2".into(),
+                },
+                CanvasOp::SelectSheet { id: "gone".into() },
+                CanvasOp::ResetSheets,
+            ],
+        };
+        let json = summary_json(&changes_result(&changes, &two, None).unwrap());
+        assert_eq!(json["currentSheet"], 1);
+        assert_eq!(json["sheetCount"], 2);
+        assert_eq!(
+            json["ops"][0],
+            serde_json::json!({
+                "type": "insert",
+                "sheet": 1,
+                "index": 0,
+                "stroke": {
+                    "id": "a",
+                    "author": "ai",
+                    "color": "#000000",
+                    "bounds": { "x": 7, "y": 7, "width": 16, "height": 6 }
+                }
+            })
+        );
+        assert_eq!(
+            json["ops"][1],
+            serde_json::json!({ "type": "remove", "sheet": 2, "ids": ["b"] })
+        );
+        assert_eq!(
+            json["ops"][2],
+            serde_json::json!({ "type": "remove", "ids": ["c"] })
+        );
+        assert_eq!(
+            json["ops"][3],
+            serde_json::json!({ "type": "addSheet", "sheet": 2 })
+        );
+        assert_eq!(json["ops"][4], serde_json::json!({ "type": "addSheet" }));
+        assert_eq!(json["ops"][5], serde_json::json!({ "type": "removeSheet" }));
+        assert_eq!(
+            json["ops"][6],
+            serde_json::json!({ "type": "selectSheet", "sheet": 2 })
+        );
+        assert_eq!(json["ops"][7], serde_json::json!({ "type": "selectSheet" }));
+        assert_eq!(json["ops"][8], serde_json::json!({ "type": "resetSheets" }));
     }
 
     #[test]
@@ -597,11 +800,12 @@ mod tests {
         let changes = ChangesSince::Ops {
             revision: 4,
             ops: vec![CanvasOp::Insert {
+                sheet: INITIAL_SHEET_ID.into(),
                 stroke: stroke("a"),
                 index: 0,
             }],
         };
-        let result = sent_result(7, &changes, &snapshot(), None).unwrap();
+        let result = sent_result(7, &changes, &snapshot(vec![stroke("a")], None), None).unwrap();
         assert_eq!(result.content.len(), 2, "変更があれば画像付き");
         assert_eq!(
             summary_json(&result),
@@ -610,9 +814,12 @@ mod tests {
                 "canvas": 7,
                 "kind": "ops",
                 "revision": 4,
+                "currentSheet": 1,
+                "sheetCount": 1,
                 "canvases": canvases_json(),
                 "ops": [{
                     "type": "insert",
+                    "sheet": 1,
                     "index": 0,
                     "stroke": {
                         "id": "a",
@@ -621,7 +828,7 @@ mod tests {
                         "bounds": { "x": 7, "y": 7, "width": 16, "height": 6 }
                     }
                 }],
-                "image": { "revision": 4, "x": 0.0, "y": 0.0, "width": 30.0, "height": 20.0, "scale": 1.0 }
+                "image": { "revision": 4, "sheet": 1, "x": 0.0, "y": 0.0, "width": 30.0, "height": 20.0, "scale": 1.0 }
             })
         );
         // Not nested thanks to flatten
@@ -634,7 +841,7 @@ mod tests {
             revision: 4,
             ops: Vec::new(),
         };
-        let result = sent_result(7, &changes, &snapshot(), None).unwrap();
+        let result = sent_result(7, &changes, &snapshot(vec![stroke("a")], None), None).unwrap();
         assert_eq!(result.content.len(), 1, "変更が無ければ画像なし");
         assert_eq!(
             summary_json(&result),
@@ -643,6 +850,8 @@ mod tests {
                 "canvas": 7,
                 "kind": "ops",
                 "revision": 4,
+                "currentSheet": 1,
+                "sheetCount": 1,
                 "canvases": canvases_json(),
                 "ops": []
             })
@@ -661,14 +870,19 @@ mod tests {
 
     #[test]
     fn placed_image_is_described_and_drawn_under_strokes() {
-        let snapped = Snapshot {
-            revision: 4,
-            views: Vec::new(),
-            strokes: vec![stroke("a")],
-            // An image that completely covers the stroke (7..23, 7..13)
-            image: Some(placement("img", 5.0, 5.0, 30.0, 20.0)),
-        };
-        let result = canvas_result(&snapped, true, Some(&StoredImage::new(red_png()))).unwrap();
+        // An image that fully covers the strokes (7..23, 7..13)
+        let mut snapped = snapshot(
+            vec![stroke("a")],
+            Some(placement("img", 5.0, 5.0, 30.0, 20.0)),
+        );
+        snapped.views.clear();
+        let result = canvas_result(
+            &snapped,
+            snapped.current_sheet(),
+            true,
+            Some(&StoredImage::new(red_png())),
+        )
+        .unwrap();
         let json = summary_json(&result);
         assert_eq!(
             json["placedImage"],
@@ -683,18 +897,22 @@ mod tests {
     /// Even if the image is placed larger than the paper, the captured area stays the paper (the handwriting does not shrink)
     #[test]
     fn image_beyond_the_page_does_not_grow_the_rendered_area() {
-        let snapped = Snapshot {
-            revision: 4,
-            views: vec![view(2, 30.0, 20.0)],
-            strokes: vec![stroke("a")],
-            // An image extending far beyond the right and bottom of the paper (30×20)
-            image: Some(placement("img", 10.0, 10.0, 4000.0, 3000.0)),
-        };
-        let result = canvas_result(&snapped, true, Some(&StoredImage::new(red_png()))).unwrap();
+        // An image that extends far past the right and bottom of the paper (30×20)
+        let snapped = snapshot(
+            vec![stroke("a")],
+            Some(placement("img", 10.0, 10.0, 4000.0, 3000.0)),
+        );
+        let result = canvas_result(
+            &snapped,
+            snapped.current_sheet(),
+            true,
+            Some(&StoredImage::new(red_png())),
+        )
+        .unwrap();
         let json = summary_json(&result);
         assert_eq!(
             json["image"],
-            serde_json::json!({ "revision": 4, "x": 0.0, "y": 0.0, "width": 30.0, "height": 20.0, "scale": 1.0 })
+            serde_json::json!({ "revision": 4, "sheet": 1, "x": 0.0, "y": 0.0, "width": 30.0, "height": 20.0, "scale": 1.0 })
         );
         // The area the image covers is returned as the placement itself
         assert_eq!(
@@ -706,14 +924,19 @@ mod tests {
     /// When no page is connected the paper is unknown, so the whole image area is captured
     #[test]
     fn image_area_is_whole_without_any_page() {
-        let snapped = Snapshot {
-            revision: 4,
-            views: Vec::new(),
-            strokes: Vec::new(),
-            image: Some(placement("img", 10.0, 10.0, 4000.0, 3000.0)),
-        };
+        let mut snapped = snapshot(
+            Vec::new(),
+            Some(placement("img", 10.0, 10.0, 4000.0, 3000.0)),
+        );
+        snapped.views.clear();
         let json = summary_json(
-            &canvas_result(&snapped, true, Some(&StoredImage::new(red_png()))).unwrap(),
+            &canvas_result(
+                &snapped,
+                snapped.current_sheet(),
+                true,
+                Some(&StoredImage::new(red_png())),
+            )
+            .unwrap(),
         );
         assert_eq!(json["image"]["x"], 10.0);
         assert_eq!(json["image"]["width"], 4000.0);
@@ -729,19 +952,28 @@ mod tests {
             revision: 4,
             ops: vec![
                 CanvasOp::SetImage {
+                    sheet: INITIAL_SHEET_ID.into(),
                     image: placement("img", 1.0, 2.0, 10.5, 4.0),
                 },
-                CanvasOp::RemoveImage,
+                CanvasOp::RemoveImage {
+                    sheet: INITIAL_SHEET_ID.into(),
+                },
             ],
         };
-        let json = summary_json(&changes_result(&changes, &snapshot(), None).unwrap());
+        let json = summary_json(
+            &changes_result(&changes, &snapshot(vec![stroke("a")], None), None).unwrap(),
+        );
         assert_eq!(
             json["ops"][0],
             serde_json::json!({
                 "type": "setImage",
+                "sheet": 1,
                 "image": { "id": "img", "bounds": { "x": 1, "y": 2, "width": 11, "height": 4 } }
             })
         );
-        assert_eq!(json["ops"][1], serde_json::json!({ "type": "removeImage" }));
+        assert_eq!(
+            json["ops"][1],
+            serde_json::json!({ "type": "removeImage", "sheet": 1 })
+        );
     }
 }

@@ -1,9 +1,21 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { RemoteAction } from '../canvas/strokeHistory';
+import {
+  type LegacyCanvasOp,
+  type RemoteAction,
+} from '../canvas/strokeHistory';
 import type { ConnectionStatus } from '../canvas/types';
 import { connectBridge, type BridgeConnection } from './bridgeClient';
 import type { ConnectionInfo } from './connectionInfo';
-import type { CanvasOp, PageSize, ServerMessage, Viewport } from './protocol';
+import type { SheetOp } from './canvasOp';
+import {
+  type CanvasOp,
+  type ImagePlacement,
+  type PageSize,
+  PROTOCOL_VERSION,
+  type ServerMessage,
+  type Stroke,
+  type Viewport,
+} from './protocol';
 import { readResumeKey, saveResumeKey } from './resumeKey';
 
 /** Store of image bytes (ImageStore in features/canvas) */
@@ -40,6 +52,21 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** The snapshot shape of bridges up to v0.3.0 (strokes and image without sheets).
+It arrives as JSON, so it cannot be told apart from the ServerMessage type above */
+interface LegacySnapshot {
+  type: 'snapshot';
+  strokes: Stroke[];
+  image?: ImagePlacement | null;
+}
+
+/** Sheet changes (addSheet / removeSheet / selectSheet / resetSheets) */
+const isSheetChange = (op: CanvasOp): op is SheetOp =>
+  op.type === 'addSheet' ||
+  op.type === 'removeSheet' ||
+  op.type === 'selectSheet' ||
+  op.type === 'resetSheets';
+
 /** Connects to the PC (bridge) and sends canvas changes both ways */
 export function useBridgeSync({
   info,
@@ -54,15 +81,15 @@ export function useBridgeSync({
     info ? 'connecting' : 'disconnected',
   );
   const [message, setMessage] = useState<string | null>(null);
-  // Whether the AI is waiting (waiting) and whether a Send to AI press has not been picked up yet (queued).
-  // null means "no AiStatus received from the bridge yet". An old bridge (which does not know this message)
-  // cannot parse a sendToAi it receives and drops the connection, so nothing is sent until one is received
-  const [aiStatus, setAiStatus] = useState<{
-    waiting: boolean;
-    queued: boolean;
-  } | null>(null);
+  // Whether the AI is waiting in wait_for_canvas (waiting in the bridge's aiStatus).
+  // Old bridges do not send aiStatus, so it stays false and sendToAi, which they cannot read, is not sent
+  // (sending it would close the connection)
+  const [aiWaiting, setAiWaiting] = useState(false);
   // Another page reconnected with this page's key and this connection was closed (tell the user)
   const [superseded, setSuperseded] = useState(false);
+  // Whether syncing with an old bridge (up to v0.3.0). Handles a single sheet and sends no sheet changes
+  const [singleSheet, setSingleSheet] = useState(false);
+  const legacyBridgeRef = useRef(false);
   // Incrementing it reconnects (when the user chooses to after a disconnect)
   const [attempt, setAttempt] = useState(0);
   // Holds only a connection that is approved and syncing
@@ -89,7 +116,9 @@ export function useBridgeSync({
       syncingRef.current = null;
       setStatus('disconnected');
       setMessage(text);
-      setAiStatus(null);
+      setAiWaiting(false);
+      legacyBridgeRef.current = false;
+      setSingleSheet(false);
     };
 
     const onMessage = (received: ServerMessage) => {
@@ -100,29 +129,58 @@ export function useBridgeSync({
         case 'resumeKey':
           saveResumeKey(received.key);
           return;
-        case 'snapshot':
-          applyRemote({
-            type: 'snapshot',
-            strokes: received.strokes,
-            image: received.image,
-          });
-          // Even on the same connection, the whole canvas is resent when changes were missed. Keep the sent record then
+        case 'snapshot': {
+          // Snapshots from old bridges (up to v0.3.0) have no sheets (it arrives as JSON, so
+          // the types cannot tell them apart)
+          const snapshot = received as
+            Extract<ServerMessage, { type: 'snapshot' }> | LegacySnapshot;
+          const legacy = !('sheets' in snapshot);
+          legacyBridgeRef.current = legacy;
+          setSingleSheet(legacy);
+          if (legacy) {
+            applyRemote({
+              type: 'legacySnapshot',
+              strokes: snapshot.strokes,
+              image: snapshot.image,
+            });
+            if (snapshot.image && !images.has(snapshot.image.id)) {
+              connection?.requestImageBytes(snapshot.image.id);
+            }
+          } else {
+            applyRemote({
+              type: 'snapshot',
+              sheets: snapshot.sheets,
+              current: snapshot.current,
+            });
+            // Request the bytes of images on any sheet that this page does not have
+            for (const sheet of snapshot.sheets) {
+              if (sheet.image && !images.has(sheet.image.id)) {
+                connection?.requestImageBytes(sheet.image.id);
+              }
+            }
+          }
+          // Even on the same connection, the whole canvas is resent after missed messages. Keep the sent record then
           if (syncingRef.current !== connection) {
             sentImagesRef.current.clear();
           }
           syncingRef.current = connection;
           setStatus('connected');
           setMessage(null);
-          // If the page does not know the bytes of the bridge's image, receive them on a separate stream
-          if (received.image && !images.has(received.image.id)) {
-            connection?.requestImageBytes(received.image.id);
-          }
           return;
+        }
         case 'aiStatus':
-          setAiStatus({ waiting: received.waiting, queued: received.queued });
+          setAiWaiting(received.waiting);
           return;
         case 'op':
-          applyRemote({ type: 'remote', op: received.op });
+          if (legacyBridgeRef.current) {
+            // Changes from old bridges have no sheet. Treat them as changes to the current sheet
+            applyRemote({
+              type: 'legacyRemote',
+              op: received.op as LegacyCanvasOp,
+            });
+          } else {
+            applyRemote({ type: 'remote', op: received.op });
+          }
           if (
             received.op.type === 'setImage' &&
             !images.has(received.op.image.id)
@@ -178,6 +236,7 @@ export function useBridgeSync({
         opened.send({
           type: 'hello',
           token: info.token,
+          protocol: PROTOCOL_VERSION,
           resume: readResumeKey(),
           ...viewRef.current,
         });
@@ -200,14 +259,14 @@ export function useBridgeSync({
     setStatus('connecting');
     setMessage(null);
     setSuperseded(false);
-    setAiStatus(null);
+    setAiWaiting(false);
     setAttempt((count) => count + 1);
   }, []);
   const dismissSuperseded = useCallback(() => setSuperseded(false), []);
-  // Tells the AI that the user finished writing. Not sent until an AiStatus has been received from the bridge
-  // (until then, the bridge may not be one that can parse sendToAi)
+  // Tells the AI that you have finished writing. Sent only while the AI waits in wait_for_canvas.
+  // Pressing it while the AI is not waiting would not reach the AI, so it is disabled
   const sendToAi =
-    status === 'connected' && aiStatus !== null
+    status === 'connected' && aiWaiting
       ? () => {
           syncingRef.current?.send({ type: 'sendToAi' });
         }
@@ -221,6 +280,10 @@ export function useBridgeSync({
       return;
     }
     for (const op of outgoing) {
+      // Old bridges cannot read the sheet change types and sending them closes the connection, so they are not sent
+      if (legacyBridgeRef.current && isSheetChange(op)) {
+        continue;
+      }
       if (op.type === 'setImage' && !sentImagesRef.current.has(op.image.id)) {
         const bytes = images.get(op.image.id);
         if (bytes) {
@@ -247,8 +310,8 @@ export function useBridgeSync({
     reconnect: canReconnect ? reconnect : null,
     superseded,
     dismissSuperseded,
-    aiWaiting: status === 'connected' && aiStatus?.waiting === true,
-    sendQueued: status === 'connected' && aiStatus?.queued === true,
     sendToAi,
+    /** Whether syncing with an old bridge (up to v0.3.0). Used to hide the sheet switcher */
+    singleSheet,
   };
 }

@@ -96,16 +96,7 @@ impl Ui {
 
 /// Marker file showing the guide has been shown. Stored in the OS's settings directory
 fn marker_path() -> Option<PathBuf> {
-    let base = if cfg!(target_os = "windows") {
-        PathBuf::from(std::env::var_os("APPDATA")?)
-    } else if cfg!(target_os = "macos") {
-        PathBuf::from(std::env::var_os("HOME")?).join("Library/Application Support")
-    } else {
-        std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .or_else(|| Some(PathBuf::from(std::env::var_os("HOME")?).join(".config")))?
-    };
-    Some(base.join(env!("CARGO_BIN_NAME")).join("first-run-done"))
+    crate::paths::config_dir().map(|dir| dir.join("first-run-done"))
 }
 
 /// Opens the QR code window on first launch. Marks the guide as done only if it opened

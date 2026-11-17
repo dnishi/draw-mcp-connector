@@ -24,11 +24,13 @@ mod lock;
 mod mcp;
 mod net;
 mod pairing;
+mod paths;
 mod protocol;
 mod render;
 mod resume;
 mod shapes;
-// The QR code is used only in the window (macOS / Windows). Tests also run on other OSes
+mod store;
+// The QR code is used only in the window (macOS / Windows). Tests also run on Linux for development
 #[cfg(any(test, target_os = "macos", target_os = "windows"))]
 mod qr;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -42,12 +44,17 @@ mod webtransport;
 
 use std::sync::Arc;
 
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use app::App;
+use store::Store;
 
 /// Runs the WebTransport and MCP servers. Exits when either stops
 async fn serve(app: Arc<App>) {
+    // The save task does not stop the servers even if it ends
+    if let Some(store) = app.store.clone() {
+        tokio::spawn(store::run(app.clone(), store));
+    }
     let result = tokio::try_join!(webtransport::run(app.clone()), mcp::run(app));
     if let Err(error) = result {
         error!("サーバーが止まった: {error}");
@@ -58,7 +65,13 @@ async fn serve(app: Arc<App>) {
 fn main() {
     tracing_subscriber::fmt::init();
     info!("{} を起動", config::APP_NAME);
-    let app = Arc::new(App::new());
+    let app = match paths::data_dir() {
+        Some(dir) => Arc::new(App::with_store(Store::new(dir))),
+        None => {
+            warn!("データの置き場所が決まらないため、キャンバスの状態を保存しない");
+            Arc::new(App::new())
+        }
+    };
     let runtime = tokio::runtime::Runtime::new().expect("tokio を起動できない");
 
     #[cfg(any(target_os = "macos", target_os = "windows"))]

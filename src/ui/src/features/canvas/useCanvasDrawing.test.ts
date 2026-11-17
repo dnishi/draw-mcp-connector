@@ -1,10 +1,11 @@
 import { act, renderHook } from '@testing-library/react';
 import type { PointerEvent as ReactPointerEvent, RefObject } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { ImagePlacement } from '../sync/protocol';
+import { type ImagePlacement, INITIAL_SHEET_ID } from '../sync/protocol';
 import { ImageStore } from './imageStore';
 import { useCanvasDrawing } from './useCanvasDrawing';
 import type { ToolSettings } from './types';
+import { INITIAL_VIEW } from './view';
 
 // jsdom has no navigator.gpu, so no renderer is created (no drawing; only state is tracked)
 const canvasStub = () => ({
@@ -130,7 +131,7 @@ describe('useCanvasDrawing', () => {
     const moved = placement('img', 50, 40);
     expect(result.current.image).toEqual(moved);
     expect(result.current.outgoing).toEqual([
-      { type: 'setImage', image: moved },
+      { type: 'setImage', sheet: INITIAL_SHEET_ID, image: moved },
     ]);
   });
 
@@ -293,5 +294,32 @@ describe('useCanvasDrawing', () => {
     // The history is now empty, so both are discarded
     expect(images.has('a')).toBe(false);
     expect(images.has('b')).toBe(false);
+  });
+
+  it('紙を切り替えると表示が等倍に戻る', () => {
+    const { result, event } = setup();
+    // Zoom in with a two-finger pinch
+    const touch = (type: string, pointerId: number, x: number) =>
+      event({ type, pointerType: 'touch', pointerId, x, y: 30 });
+    act(() =>
+      result.current.pointerHandlers.onPointerDown(touch('pointerdown', 1, 40)),
+    );
+    act(() =>
+      result.current.pointerHandlers.onPointerDown(touch('pointerdown', 2, 80)),
+    );
+    act(() =>
+      result.current.pointerHandlers.onPointerMove(
+        touch('pointermove', 2, 160),
+      ),
+    );
+    act(() =>
+      result.current.pointerHandlers.onPointerUp(touch('pointerup', 2, 160)),
+    );
+    expect(result.current.view.scale).toBeGreaterThan(1);
+
+    act(() => result.current.sheets.add?.());
+
+    expect(result.current.view).toEqual(INITIAL_VIEW);
+    expect(result.current.sheets.number).toBe(2);
   });
 });

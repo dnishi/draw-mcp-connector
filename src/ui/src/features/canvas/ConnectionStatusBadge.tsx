@@ -59,26 +59,15 @@ interface ConnectionStatusBadgeProps {
   status: ConnectionStatus;
   /** Passed only when reconnecting is possible (after a disconnect). When passed, pressing it reconnects */
   onReconnect?: (() => void) | null;
-  /** The AI is waiting in wait_for_canvas. Used only while connected */
-  aiWaiting?: boolean;
 }
 
 export function ConnectionStatusBadge({
   status,
   onReconnect,
-  aiWaiting,
 }: ConnectionStatusBadgeProps) {
   const { label, icon: Icon, tone, iconClassName } = STATUS_VIEW[status];
-  // While the AI is waiting, the icon pulses slowly and the status name is "Connected. AI is waiting"
-  const waitingForAi = status === 'connected' && aiWaiting === true;
-  const name = waitingForAi ? `${label}. AI is waiting` : label;
   const className = cn(ITEM_CLASS, TONE_CLASS[tone]);
-  const icon = (
-    <Icon
-      aria-hidden
-      className={cn(iconClassName, waitingForAi && 'motion-safe:animate-pulse')}
-    />
-  );
+  const icon = <Icon aria-hidden className={iconClassName} />;
 
   if (onReconnect) {
     return (
@@ -98,20 +87,9 @@ export function ConnectionStatusBadge({
   }
 
   return (
-    <span
-      role="status"
-      title={name}
-      className={cn(className, waitingForAi && 'relative')}
-    >
+    <span role="status" title={label} className={className}>
       {icon}
-      {/* For people with reduced motion (motion-reduce), show a dot at the top right of the square instead of pulsing */}
-      {waitingForAi && (
-        <span
-          aria-hidden
-          className="absolute top-0 right-0 hidden size-1.5 rounded-full bg-[#34c759] motion-reduce:block dark:bg-[#30d158]"
-        />
-      )}
-      <span className="sr-only">{name}</span>
+      <span className="sr-only">{label}</span>
     </span>
   );
 }

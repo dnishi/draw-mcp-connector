@@ -1,40 +1,28 @@
 import { Send } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { cn } from 'cn';
 
 interface SendToAiButtonProps {
-  /** Sends the notice. When null (not connected), the button cannot be pressed */
+  /** Function that sends the notice. If null (not connected, or the AI is not waiting), the button is disabled */
   onSend: (() => void) | null;
-  /** Pressed, but the AI (wait_for_canvas) has not picked it up yet */
-  queued: boolean;
 }
 
 /**
- * Tells the AI that the user finished writing (the bridge hands it to MCP's wait_for_canvas).
- * If no AI is waiting, the bridge remembers it and the next call returns right away
+ * Tells the AI that you have finished writing (the bridge hands it to the MCP tool wait_for_canvas).
+ * It can be pressed only while the AI is waiting; otherwise it is faded (disabled).
+ * To tell it apart from when it can be pressed, it is fainter than other disabled buttons (half opacity)
  */
-export function SendToAiButton({ onSend, queued }: SendToAiButtonProps) {
-  const name = queued
-    ? 'Send to AI. Sent, waiting for the AI to read it'
-    : 'Send to AI';
+export function SendToAiButton({ onSend }: SendToAiButtonProps) {
   return (
     <Button
       variant="ghost"
       size="icon-lg"
-      aria-label={name}
-      title={name}
+      aria-label="Send to AI"
+      title="Send to AI"
       disabled={onSend === null}
       onClick={onSend ?? undefined}
-      className={cn(queued && 'relative')}
+      className="disabled:opacity-25"
     >
       <Send />
-      {queued && (
-        // Show a dot at the top right until the AI picks it up
-        <span
-          aria-hidden
-          className="absolute top-0 right-0 size-1.5 rounded-full bg-primary"
-        />
-      )}
     </Button>
   );
 }

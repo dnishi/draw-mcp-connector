@@ -30,7 +30,7 @@ use crate::link_status::LinkStatus;
 use crate::lock::lock;
 use crate::net;
 use crate::pairing::Endpoint;
-use crate::protocol::{CanvasOp, ClientMessage, ImageStream, ServerMessage};
+use crate::protocol::{CanvasOp, ClientMessage, ImageStream, PROTOCOL_VERSION, ServerMessage};
 use crate::render::StoredImage;
 use crate::resume::Lease;
 use crate::{config, ui};
@@ -124,13 +124,13 @@ struct Messages {
     line: Vec<u8>,
 }
 
-/// Turns the whole canvas (snapshot) into the form sent to pages. Only strokes and the image are sent to pages;
-/// the revision number and per-page views (for the AI) are not included
+/// Turns the whole canvas (snapshot) into the form sent to the page. Only the sheets and the current sheet are sent;
+/// the revision and the per-page views (for the AI) are left out
 impl From<crate::canvas::Snapshot> for ServerMessage {
     fn from(snapshot: crate::canvas::Snapshot) -> Self {
         Self::Snapshot {
-            strokes: snapshot.strokes,
-            image: snapshot.image,
+            sheets: snapshot.sheets,
+            current: snapshot.current,
         }
     }
 }
@@ -194,6 +194,7 @@ async fn handle_session(app: Arc<App>, incoming: IncomingSession, id: u64) -> Re
         viewport,
         page,
         resume,
+        protocol,
     }))) = hello
     else {
         return messages.reject("Send hello first.").await;
@@ -201,6 +202,17 @@ async fn handle_session(app: Arc<App>, incoming: IncomingSession, id: u64) -> Re
     if !app.pairing.token_matches(&token) {
         return messages
             .reject("The QR code is outdated or invalid. Scan it again.")
+            .await;
+    }
+    // Compatibility with other versions: reject pages that do not know the version (from before sheets) and pages with a newer version
+    if protocol == 0 {
+        return messages
+            .reject("This canvas page is out of date. Reload the page.")
+            .await;
+    }
+    if protocol > PROTOCOL_VERSION {
+        return messages
+            .reject("The PC app is out of date. Update it.")
             .await;
     }
 
@@ -330,7 +342,9 @@ async fn sync(
                     // An image's contents arrive only once, when imported. For an image it does not have
                     // (e.g. one brought back by undo after the oldest were dropped), ask the page that placed it
                     let missing = match &op {
-                        CanvasOp::SetImage { image } if app.canvas.image_data(&image.id).is_none() => {
+                        CanvasOp::SetImage { image, .. }
+                            if app.canvas.image_data(&image.id).is_none() =>
+                        {
                             Some(image.id.clone())
                         }
                         _ => None,
@@ -375,10 +389,17 @@ async fn sync(
             }
             change = changes.recv() => match change {
                 Ok(change) => {
-                    // If the placement is removed or replaced by another image, the remembered contents become meaningless
+                    // When the placement is removed, replaced with another image, or its sheet removed, the remembered contents
+                    // become meaningless. Keep only images still placed (so as not to drop those waited for on
+                    // other sheets). The canvas lock and the wanted lock are never held together
                     match &change.op {
-                        CanvasOp::SetImage { image } => lock(&wanted).retain(|id| id == &image.id),
-                        CanvasOp::RemoveImage => lock(&wanted).clear(),
+                        CanvasOp::SetImage { .. }
+                        | CanvasOp::RemoveImage { .. }
+                        | CanvasOp::RemoveSheet { .. }
+                        | CanvasOp::ResetSheets => {
+                            let placed = app.canvas.placed_image_ids();
+                            lock(&wanted).retain(|id| placed.contains(id));
+                        }
                         _ => {}
                     }
                     if change.origin != origin {
@@ -471,9 +492,9 @@ async fn handle_image_stream(
             {
                 Ok(count) => count,
                 Err(error) => {
-                    // The contents were cut off midway. The page ignores Requests while it is still sending,
-                    // so if the image is placed and has no contents, ask this connection again to make it resend
-                    if app.canvas.image().is_some_and(|image| image.id == id)
+                    // The contents were cut off. The page ignores a Request it is in the middle of sending, so
+                    // if the image is placed and has no contents, ask this connection again to resend it
+                    if app.canvas.placed_image(&id).is_some()
                         && app.canvas.image_data(&id).is_none()
                         && let Err(send_error) =
                             send_image_stream(connection, &ImageStream::Request { id }, None).await
@@ -498,9 +519,9 @@ async fn handle_image_stream(
                 .await?;
                 return Ok(());
             }
-            // No contents yet. If it is the placed image (the requesting page should be showing it),
-            // remember it until the arrival notice. There is no point remembering one that is not placed
-            if app.canvas.image().is_some_and(|image| image.id == id) {
+            // No contents yet. If the image is placed (the requesting page should be showing it),
+            // remember it until the arrival notice. Remembering missing ones is pointless
+            if app.canvas.placed_image(&id).is_some() {
                 lock(wanted).insert(id.clone());
                 // If it arrived right after being remembered, send it without waiting for the notice (in case the notice was missed)
                 if let Some(image) = app.canvas.image_data(&id)
@@ -557,7 +578,8 @@ fn spawn_image_send(
 mod tests {
     use super::*;
     use crate::protocol::{
-        Author, CanvasOp, ImagePlacement, PageSize, Stroke, StrokePoint, Viewport,
+        Author, CanvasOp, INITIAL_SHEET_ID, ImagePlacement, PageSize, Sheet, Stroke, StrokePoint,
+        Viewport,
     };
     use std::net::Ipv4Addr;
     use std::sync::atomic::AtomicUsize;
@@ -633,7 +655,7 @@ mod tests {
         .expect("条件が満たされない");
     }
 
-    async fn connect(app: &App, resume: Option<String>) -> (Client, Connection) {
+    async fn connect(app: &App, resume: Option<String>, protocol: u32) -> (Client, Connection) {
         let url = app.pairing.canvas_url().unwrap();
         let params: std::collections::HashMap<_, _> =
             url::form_urlencoded::parse(url.fragment().unwrap().as_bytes()).collect();
@@ -662,6 +684,7 @@ mod tests {
                 viewport: VIEWPORT,
                 page: PAGE,
                 resume,
+                protocol,
             })
             .await;
         (client, connection)
@@ -706,7 +729,7 @@ mod tests {
     #[tokio::test]
     async fn syncs_after_approval_and_resumes() {
         let (app, asked) = serve();
-        let (mut client, connection) = connect(&app, None).await;
+        let (mut client, connection) = connect(&app, None, PROTOCOL_VERSION).await;
         assert_eq!(client.receive().await, ServerMessage::AwaitingApproval);
 
         let connected = app.status.wait_connected(Duration::from_secs(5)).await;
@@ -719,19 +742,25 @@ mod tests {
         assert_eq!(
             client.receive().await,
             ServerMessage::Snapshot {
-                strokes: vec![],
-                image: None
+                sheets: vec![Sheet {
+                    id: INITIAL_SHEET_ID.into(),
+                    strokes: vec![],
+                    image: None
+                }],
+                current: INITIAL_SHEET_ID.into()
             }
         );
         receive_ai_status(&mut client).await;
 
         let op = CanvasOp::Insert {
+            sheet: INITIAL_SHEET_ID.into(),
             stroke: stroke("page-1"),
             index: 0,
         };
         client.send(&ClientMessage::Op { op }).await;
         // AI changes reach the canvas, and the canvas's own changes are not sent back
         let ai_op = CanvasOp::Remove {
+            sheet: INITIAL_SHEET_ID.into(),
             ids: vec!["page-1".into()],
         };
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -806,11 +835,12 @@ mod tests {
         client
             .send(&ClientMessage::Op {
                 op: CanvasOp::SetImage {
+                    sheet: INITIAL_SHEET_ID.into(),
                     image: placement.clone(),
                 },
             })
             .await;
-        wait_until(|| app.canvas.snapshot().image.is_some()).await;
+        wait_until(|| app.canvas.snapshot().current_sheet().image.is_some()).await;
         assert_eq!(
             app.canvas
                 .image_data("img1")
@@ -818,7 +848,10 @@ mod tests {
                 .map(StoredImage::bytes),
             Some(&b"fake-png"[..])
         );
-        assert_eq!(app.canvas.snapshot().image, Some(placement.clone()));
+        assert_eq!(
+            app.canvas.snapshot().current_sheet().image,
+            Some(placement.clone())
+        );
 
         // A request from a page that does not have the bytes: the bridge sends them back on a unidirectional stream
         let mut request = connection.open_uni().await.unwrap().await.unwrap();
@@ -849,6 +882,7 @@ mod tests {
         client
             .send(&ClientMessage::Op {
                 op: CanvasOp::SetImage {
+                    sheet: INITIAL_SHEET_ID.into(),
                     image: ImagePlacement {
                         id: "img2".into(),
                         ..placement.clone()
@@ -875,6 +909,7 @@ mod tests {
             broken.finish().await.unwrap();
         }
         let keep = CanvasOp::Insert {
+            sheet: INITIAL_SHEET_ID.into(),
             stroke: stroke("keep-going"),
             index: 0,
         };
@@ -889,6 +924,7 @@ mod tests {
         client
             .send(&ClientMessage::Op {
                 op: CanvasOp::SetImage {
+                    sheet: INITIAL_SHEET_ID.into(),
                     image: ImagePlacement {
                         id: "img3".into(),
                         ..placement.clone()
@@ -899,6 +935,7 @@ mod tests {
         wait_until(|| {
             app.canvas
                 .snapshot()
+                .current_sheet()
                 .image
                 .as_ref()
                 .is_some_and(|image| image.id == "img3")
@@ -955,6 +992,7 @@ mod tests {
         client
             .send(&ClientMessage::Op {
                 op: CanvasOp::SetImage {
+                    sheet: INITIAL_SHEET_ID.into(),
                     image: ImagePlacement {
                         id: "img4".into(),
                         ..placement.clone()
@@ -965,6 +1003,7 @@ mod tests {
         wait_until(|| {
             app.canvas
                 .snapshot()
+                .current_sheet()
                 .image
                 .as_ref()
                 .is_some_and(|image| image.id == "img4")
@@ -1004,9 +1043,10 @@ mod tests {
             "置かれていない画像は求め直さない"
         );
 
-        // Reconnecting with the key returns to sync without asking for approval.
-        // If the old connection that received the key is still open, notify it and close it
-        let (mut resumed, _resumed_connection) = connect(&app, Some(key.clone())).await;
+        // Reconnecting with the key returns to syncing without asking for approval.
+        // If the old connection given the key is still open, notify it and close it
+        let (mut resumed, _resumed_connection) =
+            connect(&app, Some(key.clone()), PROTOCOL_VERSION).await;
         let next_key = receive_resume_key(&mut resumed).await;
         assert_ne!(next_key, key, "繋ぎ直すたびに新しい鍵を渡す");
         assert!(matches!(
@@ -1031,15 +1071,15 @@ mod tests {
         .expect("繋いでいるページは 1 つだけになる");
 
         // A key can be used only once
-        let (mut client, _connection) = connect(&app, Some(key)).await;
+        let (mut client, _connection) = connect(&app, Some(key), PROTOCOL_VERSION).await;
         assert_eq!(
             client.receive().await,
             ServerMessage::AwaitingApproval,
             "使った鍵では許可を求める"
         );
 
-        // Closing from the PC's menu: invalidate the key, tell the page, and close the connection
-        let (mut client, connection) = connect(&app, None).await;
+        // Disconnect from the PC's menu: invalidate the key, notify the page, and close the connection
+        let (mut client, connection) = connect(&app, None, PROTOCOL_VERSION).await;
         assert_eq!(client.receive().await, ServerMessage::AwaitingApproval);
         let key = receive_resume_key(&mut client).await;
         assert!(matches!(
@@ -1059,8 +1099,8 @@ mod tests {
         assert!(app.disconnects.request(id));
         assert_eq!(client.receive().await, ServerMessage::Disconnected);
         connection.closed().await;
-        // The key handed to the closed connection is invalid, so approval is asked again
-        let (mut client, _connection) = connect(&app, Some(key)).await;
+        // The key given to the closed connection is invalid, so approval is asked again
+        let (mut client, _connection) = connect(&app, Some(key), PROTOCOL_VERSION).await;
         assert_eq!(
             client.receive().await,
             ServerMessage::AwaitingApproval,
@@ -1068,5 +1108,14 @@ mod tests {
         );
         // After it closes (after the watch is dropped), it can no longer be requested
         wait_until(|| !app.disconnects.request(id)).await;
+
+        // A page that does not know the protocol version (from before sheets) is rejected after the token check
+        let (mut client, _connection) = connect(&app, None, 0).await;
+        assert_eq!(
+            client.receive().await,
+            ServerMessage::Rejected {
+                reason: "This canvas page is out of date. Reload the page.".into(),
+            }
+        );
     }
 }

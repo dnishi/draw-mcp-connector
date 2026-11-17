@@ -268,11 +268,11 @@ function PenSettings({
 }
 
 /**
- * Button that clears the canvas. It cannot be undone, so it asks for confirmation when pressed.
- * It sits at the end (bottom) of the toolbar, away from frequently used buttons (to prevent mistaken presses).
+ * Button that wipes only the current sheet. The action cannot be undone, so it asks for confirmation.
+ * It sits at the end (bottom) of the toolbar, away from frequently used buttons (to prevent mistaps).
  * The confirmation text and buttons follow Apple's Human Interface Guidelines (Alerts):
- * a title saying exactly what will happen, a short description, and buttons with a verb describing the result plus "Cancel".
- * It confirms an action the user chose, so the action button does not use a destructive (red) style
+ * the title says specifically what happens, the message is short, and the buttons are a verb for the result and "Cancel".
+ * It confirms an action the user chose, so the action button does not use a destructive (red) look
  */
 function ClearButton({
   disabled,
@@ -296,8 +296,8 @@ function ClearButton({
         <Trash2 />
       </AlertDialog.Trigger>
       <AlertDialogPopup
-        title="Clear the canvas?"
-        description="All strokes and the image will be erased. You can't undo this action."
+        title="Clear this sheet?"
+        description="All strokes and the image on this sheet will be erased. You can't undo this action."
       >
         <AlertDialog.Close render={<Button variant="outline" />}>
           Cancel

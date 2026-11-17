@@ -36,6 +36,16 @@ pub fn generate(roots: &[Schema]) -> String {
     output
 }
 
+/// Outputs one constant. The value is a number or a string (strings use the same quotes as `string_literal`)
+pub fn constant(name: &str, doc: &str, value: &Value) -> String {
+    let literal = if value.is_string() {
+        string_literal(value)
+    } else {
+        value.to_string()
+    };
+    format!("\n/** {doc} */\nexport const {name} = {literal};\n")
+}
+
 fn object(schema: &Value) -> &Map<String, Value> {
     schema.as_object().expect("スキーマは JSON オブジェクト")
 }
@@ -216,6 +226,22 @@ export interface Name {{
 }}
 "
             )
+        );
+    }
+
+    #[test]
+    fn constant_is_number_or_quoted_string() {
+        assert_eq!(
+            constant("MAX_SHEETS", "紙の枚数の上限", &serde_json::json!(50)),
+            "\n/** 紙の枚数の上限 */\nexport const MAX_SHEETS = 50;\n"
+        );
+        assert_eq!(
+            constant(
+                "INITIAL_SHEET_ID",
+                "最初の紙の ID",
+                &serde_json::json!("sheet-1")
+            ),
+            "\n/** 最初の紙の ID */\nexport const INITIAL_SHEET_ID = 'sheet-1';\n"
         );
     }
 }
