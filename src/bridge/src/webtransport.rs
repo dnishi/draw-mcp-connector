@@ -1295,6 +1295,9 @@ mod tests {
             ServerMessage::AwaitingApproval,
             "使った鍵では許可を求める"
         );
+        // This connection is approved too, which regenerates the token. The next connection must read
+        // the current token after that (ResumeKey arrives after the token is regenerated)
+        receive_resume_key(&mut client).await;
 
         // Disconnect from the PC's menu: invalidate the key, notify the page, and close the connection
         let (mut client, connection) = connect(&app, None, PROTOCOL_VERSION).await;
