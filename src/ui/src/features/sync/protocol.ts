@@ -33,7 +33,10 @@ export type ClientMessage =
   | { type: 'hello'; token: string; viewport: Viewport; page?: PageSize | null; protocol?: number; resume?: string | null }
   /** The visible area or paper size changed (screen size, zoom, pan) */
   | { type: 'resize'; viewport: Viewport; page?: PageSize | null }
-  | { type: 'op'; op: CanvasOp }
+  /** An operation made on the page. seq is the number the page gives each operation (increasing within the page).
+After handling the operation (applied or ignored), the bridge returns an `Ack` with the same number.
+After reconnecting, the page resends the operations without an ack, with the same numbers */
+  | { type: 'op'; op: CanvasOp; seq: number }
   /** Send to AI was pressed. Tells the AI (MCP's wait_for_canvas) */
   | { type: 'sendToAi' };
 
@@ -75,13 +78,14 @@ Sending the last received key with hello reconnects without waiting for approval
   | { type: 'superseded' }
   /** The connection was closed from the PC's menu. The connection is closed after this */
   | { type: 'disconnected' }
-  /** Approved. The whole canvas held by the bridge (the sheets and the current sheet's ID). The page follows it:
-sheets only it has (such as ones written before the bridge restarted) are sent back with addSheet and insert
-if they have contents, and empty ones are discarded. The current sheet is the bridge's.
-The bridge's images win, but an image only the page has is sent back with setImage.
+  /** Approved. The whole canvas the bridge has (the list of sheets and the current sheet ID). The page replaces its own with it,
+then reapplies and resends its operations that have no ack yet.
 If the page lacks the bytes of a bridge image, it receives them with an ImageStream request */
   | { type: 'snapshot'; sheets: Sheet[]; current: string }
   | { type: 'op'; op: CanvasOp }
+  /** Reports that an `Op` was handled (applied or ignored). The page removes the operations up to
+this number from those to resend */
+  | { type: 'ack'; seq: number }
   /** Whether the AI is waiting in wait_for_canvas (waiting) and whether a Send to AI press has not been
 picked up by the AI yet (queued). Sent when syncing starts (right after snapshot) and when it changes */
   | { type: 'aiStatus'; waiting: boolean; queued: boolean };
@@ -123,8 +127,9 @@ export interface Viewport {
 }
 
 /** Version of the page–bridge protocol. The page sends it in hello, and the bridge rejects a different one.
-Pages from before sheets do not send it, so it is taken as 0 */
-export const PROTOCOL_VERSION = 1;
+Pages from before sheets do not send it, so it is taken as 0.
+From 2, operations carry a seq and the bridge returns an ack */
+export const PROTOCOL_VERSION = 2;
 
 /** Maximum number of sheets */
 export const MAX_SHEETS = 50;

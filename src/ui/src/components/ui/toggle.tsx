@@ -2,7 +2,7 @@
 
 import { Toggle as TogglePrimitive } from '@base-ui/react/toggle';
 import { cva, type VariantProps } from 'class-variance-authority';
-import { cn } from 'cn';
+import { cn } from '@/lib/utils';
 
 // A pressed (selected) button is shown with an inset outline in addition to the background (bg-muted, same as hover).
 // The background alone is nearly white and cannot be told apart from hover

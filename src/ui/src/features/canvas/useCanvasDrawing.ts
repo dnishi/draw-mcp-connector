@@ -18,7 +18,7 @@ import {
   type StrokePoint,
 } from './stroke';
 import { newStrokeId } from './strokeId';
-import { buildSceneVertices } from './strokeMesh';
+import { CommittedStrokes, tessellateStroke } from './strokeMesh';
 import {
   currentSheet,
   initialStrokeHistory,
@@ -28,6 +28,7 @@ import {
 } from './strokeHistory';
 import { type ImagePlacement, MAX_SHEETS } from '../sync/protocol';
 import type { EraserMode, History, SheetControls, ToolSettings } from './types';
+import type { StrokeRenderer } from './StrokeRenderer';
 import { useStrokeRenderer } from './useStrokeRenderer';
 import {
   INITIAL_VIEW,
@@ -48,6 +49,8 @@ const STROKE_ERASER_RADIUS = 12;
  * The image does not move until it is exceeded (so small finger or pen jitter does not turn a click into a move)
  */
 const CLICK_SLOP = 4;
+/** Empty vertex array passed when no stroke is being drawn (tools other than the pen) */
+const EMPTY_VERTICES = new Float32Array(0);
 
 /** Reports image operations with the move tool (Move Image) (opens and closes the popover near the image) */
 export interface ImageEvents {
@@ -168,6 +171,11 @@ export function useCanvasDrawing(
   const strokes = sheet.strokes;
   const image = sheet.image;
 
+  /** One CommittedStrokes per renderer (recreated when the renderer changes) */
+  const committedRef = useRef<{
+    renderer: StrokeRenderer;
+    committed: CommittedStrokes;
+  } | null>(null);
   const strokesRef = useRef(strokes);
   const imageRef = useRef(image);
   const gestureRef = useRef<Gesture | null>(null);
@@ -225,8 +233,15 @@ export function useCanvasDrawing(
         imageGestureRef.current?.working ??
         imageRef.current;
       const bitmap = placement ? images.bitmap(placement.id) : undefined;
+      if (committedRef.current?.renderer !== renderer) {
+        committedRef.current = { renderer, committed: new CommittedStrokes() };
+      }
+      const { committed } = committedRef.current;
+      // While erasing, visibleStrokes makes a new array, so this is a rebuild.
+      // Rewriting everything is the same amount of work as before, so it adds no extra cost
       renderer.draw(
-        buildSceneVertices(strokes, active),
+        committed.update(strokes),
+        active ? tessellateStroke(active.points, active.color) : EMPTY_VERTICES,
         viewRef.current,
         placement && bitmap ? { bitmap, ...placement } : undefined,
       );
@@ -813,8 +828,8 @@ export function useCanvasDrawing(
       imageRef.current = image;
       requestRender();
     },
-    /** Changes this page made in the last operation (sent to the PC) */
-    outgoing: state.outgoing,
+    /** Operations made on this page that the PC has not acked yet (sent to the PC) */
+    pending: state.pending,
     applyRemote,
     eraserCursorRef,
     imageFrameRef,

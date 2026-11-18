@@ -6,13 +6,13 @@
 
 use std::collections::HashSet;
 use std::io;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use serde::de::DeserializeOwned;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::watch;
 use tracing::{info, warn};
@@ -58,17 +58,42 @@ fn start(app: &Arc<App>) -> Result<Arc<WtEndpoint<Server>>, BoxError> {
 
 async fn accept_sessions(app: Arc<App>, server: Arc<WtEndpoint<Server>>) -> Result<(), BoxError> {
     let next_id = AtomicU64::new(1);
+    // Up to config::MAX_SESSIONS at once, counting both approved connections and those awaiting approval.
+    // A permit is held until the connection ends and is returned then
+    let sessions = Arc::new(tokio::sync::Semaphore::new(config::MAX_SESSIONS));
     loop {
         let incoming = server.accept().await;
         let id = next_id.fetch_add(1, Ordering::Relaxed);
+        let permit = match sessions.clone().try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                // Dropping incoming closes the connection
+                warn!(
+                    "同時に扱う接続の上限({})を超えたので、接続 {id} を断る",
+                    config::MAX_SESSIONS
+                );
+                continue;
+            }
+        };
         let app = app.clone();
         tokio::spawn(async move {
+            // The permit is held until handle_session ends
+            let _permit = permit;
             if let Err(error) = handle_session(app, incoming, id).await {
                 warn!("接続 {id} が終了: {error}");
             }
         });
     }
 }
+
+/// Origin of the canvas page (`config::CANVAS_URL`). Connection requests from any other Origin are rejected.
+/// Built once so it is not parsed every time
+static CANVAS_ORIGIN: LazyLock<String> = LazyLock::new(|| {
+    url::Url::parse(config::CANVAS_URL)
+        .expect("config::CANVAS_URL が URL として不正")
+        .origin()
+        .ascii_serialization()
+});
 
 fn server_config(identity: Identity) -> ServerConfig {
     ServerConfig::builder()
@@ -144,21 +169,56 @@ fn ai_status_message(ai_status: &mut watch::Receiver<ai_inbox::AiStatus>) -> Ser
     }
 }
 
+/// Result of `read_line`
+#[derive(Debug, PartialEq, Eq)]
+enum LineRead {
+    /// A whole line was read (into `line`, including the newline)
+    Line,
+    /// The peer closed the stream with nothing partly read
+    Closed,
+}
+
+/// Appends one line, up to the newline, to `line`.
+/// If interrupted by `select!`, the partial line stays in `line` (and the reader's buffer),
+/// so calling again continues from there (`read_until` is cancel safe).
+/// When `line` grows beyond `limit`, or the peer closes mid-line, the error is
+/// "the message is too large or was cut off"
+async fn read_line(
+    reader: &mut (impl AsyncBufRead + Unpin),
+    line: &mut Vec<u8>,
+    limit: u64,
+) -> io::Result<LineRead> {
+    // Read only what remains up to the limit (the limit does not reset on each call)
+    let read = (&mut *reader)
+        .take(limit.saturating_sub(line.len() as u64))
+        .read_until(b'\n', line)
+        .await?;
+    if line.ends_with(b"\n") {
+        return Ok(LineRead::Line);
+    }
+    match read {
+        // Closed with nothing read
+        0 if line.is_empty() => Ok(LineRead::Closed),
+        // Beyond limit, or closed mid-line
+        _ => Err(io::Error::other(
+            "メッセージが大きすぎるか、途中で切れている",
+        )),
+    }
+}
+
 impl Messages {
     /// Reads the next line. None when the peer closes the stream
     async fn read<T: DeserializeOwned>(&mut self) -> Result<Option<T>, BoxError> {
-        self.line.clear();
-        let read = (&mut self.reader)
-            .take(MAX_MESSAGE_BYTES)
-            .read_until(b'\n', &mut self.line)
-            .await?;
-        if read == 0 {
+        if matches!(
+            read_line(&mut self.reader, &mut self.line, MAX_MESSAGE_BYTES).await?,
+            LineRead::Closed
+        ) {
             return Ok(None);
         }
-        if self.line.last() != Some(&b'\n') {
-            return Err("メッセージが大きすぎるか、途中で切れている".into());
-        }
-        Ok(Some(serde_json::from_slice(&self.line)?))
+        let message = serde_json::from_slice(&self.line);
+        // Clear the finished line even if parsing the JSON fails (do not leave it as a partial line)
+        self.line.clear();
+        Ok(Some(message?))
     }
 
     async fn write(&mut self, message: &ServerMessage) -> Result<(), BoxError> {
@@ -178,8 +238,31 @@ impl Messages {
     }
 }
 
-async fn handle_session(app: Arc<App>, incoming: IncomingSession, id: u64) -> Result<(), BoxError> {
-    let connection = incoming.await?.accept().await?;
+/// Result from accepting a connection to reading hello
+struct Handshake {
+    connection: Connection,
+    messages: Messages,
+    remote: SocketAddr,
+    hello: Option<ClientMessage>,
+}
+
+/// Rejects the connection request with 403 if its Origin is not the canvas page's;
+/// otherwise opens the stream and reads hello
+async fn handshake(incoming: IncomingSession) -> Result<Handshake, BoxError> {
+    let request = incoming.await?;
+    match request.origin() {
+        // Accept only connections from the canvas page
+        Some(origin) if origin == CANVAS_ORIGIN.as_str() => {}
+        other => {
+            warn!(
+                "Origin が {other:?} の接続を断る(期待: {})",
+                CANVAS_ORIGIN.as_str()
+            );
+            request.forbidden().await;
+            return Err("Origin が違う".into());
+        }
+    }
+    let connection = request.accept().await?;
     let remote = connection.remote_address();
     let (writer, reader) = connection.accept_bi().await?;
     let mut messages = Messages {
@@ -187,25 +270,44 @@ async fn handle_session(app: Arc<App>, incoming: IncomingSession, id: u64) -> Re
         writer,
         line: Vec::new(),
     };
+    // An unreadable or broken hello is rejected by the caller with a reason, like a missing one
+    let hello = messages.read().await.ok().flatten();
+    Ok(Handshake {
+        connection,
+        messages,
+        remote,
+        hello,
+    })
+}
 
-    let hello = tokio::time::timeout(config::HELLO_TIMEOUT, messages.read()).await;
-    let Ok(Ok(Some(ClientMessage::Hello {
+async fn handle_session(app: Arc<App>, incoming: IncomingSession, id: u64) -> Result<(), BoxError> {
+    // One time limit covers everything from accepting the connection to receiving hello, so a connection
+    // that never opens a stream does not linger. A timeout is a normal event, so it is logged at info
+    let handshake = match tokio::time::timeout(config::HELLO_TIMEOUT, handshake(incoming)).await {
+        Err(_) => {
+            info!("接続 {id} は hello が届く前に時間切れ");
+            return Ok(());
+        }
+        Ok(handshake) => handshake?,
+    };
+    let Handshake {
+        connection,
+        mut messages,
+        remote,
+        hello,
+    } = handshake;
+    let Some(ClientMessage::Hello {
         token,
         viewport,
         page,
         resume,
         protocol,
-    }))) = hello
+    }) = hello
     else {
         return messages.reject("Send hello first.").await;
     };
-    if !app.pairing.token_matches(&token) {
-        return messages
-            .reject("The QR code is outdated or invalid. Scan it again.")
-            .await;
-    }
-    // Compatibility with other versions: reject pages that do not know the version (from before sheets) and pages with a newer version
-    if protocol == 0 {
+    // Mixed versions: reject pages with an older version and pages with a newer one
+    if protocol < PROTOCOL_VERSION {
         return messages
             .reject("This canvas page is out of date. Reload the page.")
             .await;
@@ -218,10 +320,23 @@ async fn handle_session(app: Arc<App>, incoming: IncomingSession, id: u64) -> Re
 
     // It listens on both IP versions, so IPv4 arrives as ::ffff:a.b.c.d. Convert back to IPv4 for display
     let ip = remote.ip().to_canonical();
+    // Once a connection sets a status, clear it however the connection ends (even when leaving with `?` on an error)
+    let _status = StatusGuard { app: &app, id };
+    // Check the resume key before the token: when an approved page is reloaded in the same tab, it sends
+    // the old token left in the URL along with the resume key. The token was regenerated after approval,
+    // so the page could not reconnect unless the key is checked first.
+    // Checking the key first is safe: it is a secret given only to approved connections, and it is invalid after one use
     if resume.is_some_and(|key| app.resume_keys.redeem(&key)) {
         info!("{ip} が再接続用の鍵で繋ぎ直した。許可を求めずに受ける");
+    } else if !app.pairing.token_matches(&token) {
+        return messages
+            .reject("The QR code is outdated or invalid. Scan it again.")
+            .await;
     } else if !approve(&app, &connection, &mut messages, ip, id).await? {
         return Ok(());
+    } else {
+        // Regenerate the token after approval (so the old QR code and URLs left in history can no longer be used)
+        app.pairing.renew_token();
     }
 
     let mut resume_key = app.resume_keys.issue();
@@ -250,8 +365,20 @@ async fn handle_session(app: Arc<App>, incoming: IncomingSession, id: u64) -> Re
     )
     .await;
     app.canvas.remove_view(id);
-    app.status.remove(id);
     result
+}
+
+/// Always clears the status when a connection that set it ends (however it ends).
+/// Keep it after creating it; it clears the status on `Drop`
+struct StatusGuard<'a> {
+    app: &'a App,
+    id: u64,
+}
+
+impl Drop for StatusGuard<'_> {
+    fn drop(&mut self) {
+        self.app.status.remove(self.id);
+    }
 }
 
 /// Asks for approval on the PC. true if approved.
@@ -268,16 +395,14 @@ async fn approve(
     app.status.set(id, LinkStatus::Waiting(ip));
     let allowed = tokio::select! {
         allowed = app.ui.ask_approval(ip) => allowed,
-        // Dropping ask_approval closes the dialog
+        // Dropping ask_approval closes the dialog. StatusGuard clears the status
         _ = connection.closed() => {
-            app.status.remove(id);
             return Ok(false);
         }
     };
     if allowed {
         info!("{ip} の接続を許可した");
     } else {
-        app.status.remove(id);
         messages
             .reject("The connection was denied on the PC.")
             .await?;
@@ -338,7 +463,7 @@ async fn sync(
             }
             message = messages.read::<ClientMessage>() => match message? {
                 None => return Ok(()),
-                Some(ClientMessage::Op { op }) => {
+                Some(ClientMessage::Op { op, seq }) => {
                     // An image's contents arrive only once, when imported. For an image it does not have
                     // (e.g. one brought back by undo after the oldest were dropped), ask the page that placed it
                     let missing = match &op {
@@ -359,6 +484,8 @@ async fn sync(
                             None,
                         );
                     }
+                    // Report that the operation was handled even if it was ignored (not applied)
+                    messages.write(&ServerMessage::Ack { seq }).await?;
                 }
                 Some(ClientMessage::Resize { viewport, page }) => {
                     app.canvas.set_view(CanvasView { id, ip, page, viewport });
@@ -583,6 +710,8 @@ mod tests {
     };
     use std::net::Ipv4Addr;
     use std::sync::atomic::AtomicUsize;
+    use tokio::io::AsyncWriteExt;
+    use wtransport::endpoint::ConnectOptions;
     use wtransport::{ClientConfig, VarInt};
 
     fn stroke(id: &str) -> Stroke {
@@ -655,8 +784,46 @@ mod tests {
         .expect("条件が満たされない");
     }
 
+    /// Connects with the canvas page's Origin (the URL has the current token)
     async fn connect(app: &App, resume: Option<String>, protocol: u32) -> (Client, Connection) {
+        connect_with_origin(app, resume, protocol, CANVAS_ORIGIN.as_str())
+            .await
+            .unwrap()
+    }
+
+    /// Connects with the given token (to test an old token)
+    async fn connect_with_token(
+        app: &App,
+        token: &str,
+        resume: Option<String>,
+        protocol: u32,
+    ) -> (Client, Connection) {
         let url = app.pairing.canvas_url().unwrap();
+        connect_with(&url, token, resume, protocol, CANVAS_ORIGIN.as_str())
+            .await
+            .unwrap()
+    }
+
+    /// Connects with the connection info from the QR code URL and the given Origin, and sends hello
+    async fn connect_with_origin(
+        app: &App,
+        resume: Option<String>,
+        protocol: u32,
+        origin: &str,
+    ) -> Result<(Client, Connection), BoxError> {
+        let url = app.pairing.canvas_url().unwrap();
+        let token = url.fragment().unwrap().rsplit_once("token=").unwrap().1;
+        connect_with(&url, token, resume, protocol, origin).await
+    }
+
+    /// Connects with the connection info from the QR code URL (hash, IP and port) and sends hello with the given token
+    async fn connect_with(
+        url: &url::Url,
+        token: &str,
+        resume: Option<String>,
+        protocol: u32,
+        origin: &str,
+    ) -> Result<(Client, Connection), BoxError> {
         let params: std::collections::HashMap<_, _> =
             url::form_urlencoded::parse(url.fragment().unwrap().as_bytes()).collect();
         let hash: Vec<u8> = (0..32)
@@ -668,26 +835,26 @@ mod tests {
             .with_bind_default()
             .with_server_certificate_hashes([hash.into()])
             .build();
-        let connection = WtEndpoint::client(config)
-            .unwrap()
-            .connect(format!("https://127.0.0.1:{}/", config::WEBTRANSPORT_PORT))
-            .await
-            .unwrap();
-        let (send, recv) = connection.open_bi().await.unwrap().await.unwrap();
+        let options =
+            ConnectOptions::builder(format!("https://127.0.0.1:{}/", config::WEBTRANSPORT_PORT))
+                .add_header("origin", origin)
+                .build();
+        let connection = WtEndpoint::client(config).unwrap().connect(options).await?;
+        let (send, recv) = connection.open_bi().await?.await?;
         let mut client = Client {
             send,
             recv: BufReader::new(recv),
         };
         client
             .send(&ClientMessage::Hello {
-                token: params["token"].to_string(),
+                token: token.to_string(),
                 viewport: VIEWPORT,
                 page: PAGE,
                 resume,
                 protocol,
             })
             .await;
-        (client, connection)
+        Ok((client, connection))
     }
 
     /// The received resume key
@@ -696,6 +863,11 @@ mod tests {
             ServerMessage::ResumeKey { key } => key,
             other => panic!("resumeKey のはず: {other:?}"),
         }
+    }
+
+    /// The ack returned for an operation (the number of the operation sent)
+    async fn receive_ack(client: &mut Client, seq: u64) {
+        assert_eq!(client.receive().await, ServerMessage::Ack { seq });
     }
 
     /// The AI waiting state that arrives right after snapshot (false / false, since nothing has happened yet)
@@ -729,6 +901,17 @@ mod tests {
     #[tokio::test]
     async fn syncs_after_approval_and_resumes() {
         let (app, asked) = serve();
+        // The token in the QR code before approval
+        let first_token = app
+            .pairing
+            .canvas_url()
+            .unwrap()
+            .fragment()
+            .unwrap()
+            .rsplit_once("token=")
+            .unwrap()
+            .1
+            .to_string();
         let (mut client, connection) = connect(&app, None, PROTOCOL_VERSION).await;
         assert_eq!(client.receive().await, ServerMessage::AwaitingApproval);
 
@@ -752,12 +935,28 @@ mod tests {
         );
         receive_ai_status(&mut client).await;
 
+        // The token is regenerated after approval: a new connection with the old token is rejected
+        let (mut stale, _stale_connection) =
+            connect_with_token(&app, &first_token, None, PROTOCOL_VERSION).await;
+        assert_eq!(
+            stale.receive().await,
+            ServerMessage::Rejected {
+                reason: "The QR code is outdated or invalid. Scan it again.".into(),
+            }
+        );
+
         let op = CanvasOp::Insert {
             sheet: INITIAL_SHEET_ID.into(),
             stroke: stroke("page-1"),
             index: 0,
         };
-        client.send(&ClientMessage::Op { op }).await;
+        client
+            .send(&ClientMessage::Op {
+                op: op.clone(),
+                seq: 1,
+            })
+            .await;
+        receive_ack(&mut client, 1).await;
         // AI changes reach the canvas, and the canvas's own changes are not sent back
         let ai_op = CanvasOp::Remove {
             sheet: INITIAL_SHEET_ID.into(),
@@ -838,8 +1037,10 @@ mod tests {
                     sheet: INITIAL_SHEET_ID.into(),
                     image: placement.clone(),
                 },
+                seq: 2,
             })
             .await;
+        receive_ack(&mut client, 2).await;
         wait_until(|| app.canvas.snapshot().current_sheet().image.is_some()).await;
         assert_eq!(
             app.canvas
@@ -888,8 +1089,10 @@ mod tests {
                         ..placement.clone()
                     },
                 },
+                seq: 3,
             })
             .await;
+        receive_ack(&mut client, 3).await;
         let mut wanted = tokio::time::timeout(Duration::from_secs(5), connection.accept_uni())
             .await
             .unwrap()
@@ -930,8 +1133,10 @@ mod tests {
                         ..placement.clone()
                     },
                 },
+                seq: 4,
             })
             .await;
+        receive_ack(&mut client, 4).await;
         wait_until(|| {
             app.canvas
                 .snapshot()
@@ -998,8 +1203,10 @@ mod tests {
                         ..placement.clone()
                     },
                 },
+                seq: 5,
             })
             .await;
+        receive_ack(&mut client, 5).await;
         wait_until(|| {
             app.canvas
                 .snapshot()
@@ -1043,10 +1250,21 @@ mod tests {
             "置かれていない画像は求め直さない"
         );
 
-        // Reconnecting with the key returns to syncing without asking for approval.
+        // An ignored operation (unknown sheet) also gets an ack with the same seq (applied operations are tested with 1–5 above)
+        client
+            .send(&ClientMessage::Op {
+                op: CanvasOp::RemoveSheet {
+                    id: "no-such-sheet".into(),
+                },
+                seq: 6,
+            })
+            .await;
+        receive_ack(&mut client, 6).await;
+
+        // Reconnecting with the old token (left in the URL) and the key resumes syncing without asking for approval.
         // If the old connection given the key is still open, notify it and close it
         let (mut resumed, _resumed_connection) =
-            connect(&app, Some(key.clone()), PROTOCOL_VERSION).await;
+            connect_with_token(&app, &first_token, Some(key.clone()), PROTOCOL_VERSION).await;
         let next_key = receive_resume_key(&mut resumed).await;
         assert_ne!(next_key, key, "繋ぎ直すたびに新しい鍵を渡す");
         assert!(matches!(
@@ -1108,14 +1326,92 @@ mod tests {
         );
         // After it closes (after the watch is dropped), it can no longer be requested
         wait_until(|| !app.disconnects.request(id)).await;
+        // When an approved connection drops, its status is cleared too
+        wait_until(|| {
+            !app.status
+                .all()
+                .into_iter()
+                .any(|(connection_id, _)| connection_id == id)
+        })
+        .await;
 
-        // A page that does not know the protocol version (from before sheets) is rejected after the token check
-        let (mut client, _connection) = connect(&app, None, 0).await;
+        // Pages with an older version (0: before sheets, 1: no acks) are rejected before the token is checked
+        for protocol in [0, 1] {
+            let (mut client, _connection) = connect(&app, None, protocol).await;
+            assert_eq!(
+                client.receive().await,
+                ServerMessage::Rejected {
+                    reason: "This canvas page is out of date. Reload the page.".into(),
+                }
+            );
+        }
+
+        // A connection request from an Origin other than the canvas page is rejected with 403 (no connection is established)
+        // (the port is fixed, so the tests that start a server are combined into this one)
+        assert!(
+            connect_with_origin(&app, None, PROTOCOL_VERSION, "https://evil.example")
+                .await
+                .is_err(),
+            "Origin が違う接続は確立しない"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_line_keeps_partial_reads_across_cancellation() {
+        let (mut writer, reader) = tokio::io::duplex(64);
+        let mut reader = BufReader::new(reader);
+        let mut line = Vec::new();
+        writer.write_all(b"hel").await.unwrap();
+        // The line is incomplete, so the read is interrupted by the timeout. The partial line stays in line
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(50),
+                read_line(&mut reader, &mut line, 100)
+            )
+            .await
+            .is_err(),
+            "1 行がそろっていない"
+        );
+        writer.write_all(b"lo\n").await.unwrap();
         assert_eq!(
-            client.receive().await,
-            ServerMessage::Rejected {
-                reason: "This canvas page is out of date. Reload the page.".into(),
-            }
+            read_line(&mut reader, &mut line, 100).await.unwrap(),
+            LineRead::Line,
+            "呼び直すと続きから読んで 1 行がそろう"
+        );
+        assert_eq!(&line[..], b"hello\n");
+    }
+
+    #[tokio::test]
+    async fn read_line_rejects_lines_over_the_limit() {
+        let (mut writer, reader) = tokio::io::duplex(64);
+        let mut reader = BufReader::new(reader);
+        let mut line = Vec::new();
+        writer.write_all(b"abc\n").await.unwrap();
+        assert!(
+            read_line(&mut reader, &mut line, 3).await.is_err(),
+            "limit を超えた 1 行はエラー"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_line_reports_closing() {
+        // Closing with nothing partly read means "the peer closed"
+        let (writer, reader) = tokio::io::duplex(64);
+        drop(writer);
+        let mut reader = BufReader::new(reader);
+        let mut line = Vec::new();
+        assert_eq!(
+            read_line(&mut reader, &mut line, 100).await.unwrap(),
+            LineRead::Closed
+        );
+        // Closing mid-line is an error
+        let (mut writer, reader) = tokio::io::duplex(64);
+        writer.write_all(b"ab").await.unwrap();
+        drop(writer);
+        let mut reader = BufReader::new(reader);
+        assert!(
+            read_line(&mut reader, &mut line, 100).await.is_err(),
+            "読みかけのまま閉じたらエラー"
         );
     }
 }

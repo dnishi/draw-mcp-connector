@@ -1,5 +1,5 @@
 import { Slider as SliderPrimitive } from '@base-ui/react/slider';
-import { cn } from 'cn';
+import { cn } from '@/lib/utils';
 
 interface SliderProps extends SliderPrimitive.Root.Props<number> {
   /** Name of the thumb (the input used by screen readers) */

@@ -5,11 +5,14 @@
 
 use serde::Serialize;
 
+use std::collections::VecDeque;
 use std::ops::Range;
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use crate::color;
 use crate::geometry::{Point, closest_on_segment};
+use crate::lock::lock;
 use crate::protocol::{ImagePlacement, PageSize, Stroke, StrokePoint, Viewport};
 
 /// Line radius at pressure 1 (CSS pixels). PEN_MAX_RADIUS in stroke.ts
@@ -146,19 +149,77 @@ pub struct CanvasImage {
 /// A decoded PNG (width, height, RGBA8 pixels). Colors are premultiplied by alpha (`decode_png`)
 type DecodedImage = (u32, u32, Vec<u8>);
 
-/// The bytes (PNG) of an imported image and their decoded result.
-/// Decoded only once, the first time it is drawn (so the AI's reads do not decode a large PNG every time)
+/// Number of decoded images to keep. Keeping every decoded result (up to 4096×4096 RGBA, about 64MB)
+/// for as long as the images exist would bloat memory, so only recently used ones are kept
+/// and the rest are decoded again when needed
+const MAX_DECODED_IMAGES: usize = 2;
+
+/// Keeps decoded image results for the `MAX_DECODED_IMAGES` most recently used images.
+/// The first entry is the oldest (least recently used). Failed results (`None`) are kept too,
+/// so they are not decoded every time
+#[derive(Default)]
+struct DecodedCache {
+    entries: VecDeque<(u64, Option<Arc<DecodedImage>>)>,
+}
+
+impl DecodedCache {
+    /// Remembers a decoded result. When the limit is reached, drops the oldest (least recently used)
+    /// entry. If another thread already remembered the same image, replaces that entry
+    fn remember(&mut self, key: u64, decoded: Option<Arc<DecodedImage>>) {
+        self.entries.retain(|(id, _)| *id != key);
+        while self.entries.len() >= MAX_DECODED_IMAGES {
+            self.entries.pop_front();
+        }
+        self.entries.push_back((key, decoded));
+    }
+
+    /// If a decoded result is remembered, moves it to the end as most recently used and returns it.
+    /// The outer None means "not remembered" (decode it); the inner None means "failed to decode"
+    fn take(&mut self, key: u64) -> Option<Option<Arc<DecodedImage>>> {
+        let index = self.entries.iter().position(|(id, _)| *id == key)?;
+        let (_, decoded) = self.entries.remove(index).expect("position で見つけたはず");
+        self.entries.push_back((key, decoded.clone()));
+        Some(decoded)
+    }
+
+    /// Decoded result for an image key. If not remembered, calls `decode` once, remembers the result and returns it.
+    /// The PNG is decoded outside the lock (so heavy work is not done while holding it).
+    /// Two threads may decode the same image at once, which is harmless since the results are the same
+    fn get_or_decode(
+        cache: &Mutex<Self>,
+        key: u64,
+        decode: impl FnOnce() -> Option<DecodedImage>,
+    ) -> Option<Arc<DecodedImage>> {
+        if let Some(decoded) = lock(cache).take(key) {
+            return decoded;
+        }
+        let decoded = decode().map(Arc::new);
+        lock(cache).remember(key, decoded.clone());
+        decoded
+    }
+}
+
+/// Process-wide cache of decoded images
+static DECODED_CACHE: Mutex<DecodedCache> = Mutex::new(DecodedCache {
+    entries: VecDeque::new(),
+});
+
+/// Unique number per `StoredImage` (the cache key).
+/// An image that arrives again with the same ID becomes a new `StoredImage`, so old results are not used
+static NEXT_IMAGE_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Bytes (PNG) of an imported image. Decoded results are kept in `DECODED_CACHE`
+/// for the `MAX_DECODED_IMAGES` most recently used images and decoded again when needed
 pub struct StoredImage {
     bytes: Vec<u8>,
-    /// None if it cannot be decoded or the format is not supported
-    decoded: OnceLock<Option<DecodedImage>>,
+    id: u64,
 }
 
 impl StoredImage {
     pub fn new(bytes: Vec<u8>) -> Self {
         Self {
             bytes,
-            decoded: OnceLock::new(),
+            id: NEXT_IMAGE_ID.fetch_add(1, Ordering::Relaxed),
         }
     }
 
@@ -167,11 +228,10 @@ impl StoredImage {
         &self.bytes
     }
 
-    /// The decoded result. Decoded on the first call and returned from then on
-    fn decoded(&self) -> Option<&DecodedImage> {
-        self.decoded
-            .get_or_init(|| decode_png(&self.bytes))
-            .as_ref()
+    /// The decoded image. Decodes it when it is not in the cache.
+    /// None if it cannot be decoded or the format is not supported
+    fn decoded(&self) -> Option<Arc<DecodedImage>> {
+        DecodedCache::get_or_decode(&DECODED_CACHE, self.id, || decode_png(&self.bytes))
     }
 }
 
@@ -339,7 +399,7 @@ pub fn render(
     if let Some((placement, stored)) = image
         && let Some(decoded) = stored.decoded()
     {
-        raster.draw_image(placement, decoded, area, scale);
+        raster.draw_image(placement, &decoded, area, scale);
     }
     for stroke in strokes {
         raster.draw_stroke(stroke, area, scale);
@@ -759,7 +819,7 @@ mod tests {
     fn oversized_png_is_not_decoded() {
         // A PNG whose longer side exceeds the limit is not decoded (it is still included in the area)
         let wide = StoredImage::new(solid_png(MAX_SOURCE_SIDE + 1, 1, [255, 0, 0], 255));
-        assert_eq!(wide.decoded(), None);
+        assert!(wide.decoded().is_none());
         let image = placement(0.0, 0.0, 8.0, 4.0);
         let drawn = render(&[], &[], Some((&image, &wide)), None)
             .unwrap()
@@ -833,24 +893,74 @@ mod tests {
     }
 
     #[test]
-    fn stored_image_is_decoded_once_and_drawn_the_same() {
+    fn stored_image_is_drawn_the_same_every_time() {
+        // The cache is shared by the whole process and used by other tests running in parallel.
+        // Whether it is remembered is tested in the DecodedCache tests; here only the drawn results are compared
         let stored = StoredImage::new(solid_png(2, 2, [0, 128, 0], 255));
         let image = placement(0.0, 0.0, 8.0, 4.0);
-        assert!(stored.decoded.get().is_none(), "描くまでは読まない");
+        assert_eq!(
+            stored.decoded().as_deref(),
+            Some(&(2, 2, [0, 128, 0, 255].repeat(4)))
+        );
 
         let first = render(&[], &[], Some((&image, &stored)), None)
             .unwrap()
             .unwrap();
-        assert_eq!(
-            stored.decoded.get(),
-            Some(&Some((2, 2, [0, 128, 0, 255].repeat(4)))),
-            "読んだ結果は要素の中に入る"
-        );
         let second = render(&[], &[], Some((&image, &stored)), None)
             .unwrap()
             .unwrap();
         assert_eq!(first.png, second.png, "2 回目も同じ画像になる");
         assert_eq!(first.area, second.area);
+    }
+
+    /// Beyond the limit, the least recently used entry is dropped
+    #[test]
+    fn decoded_cache_evicts_the_least_recently_used() {
+        let cache = Mutex::new(DecodedCache::default());
+        for id in 1..=3u64 {
+            DecodedCache::get_or_decode(&cache, id, || Some((id as u32, 1, vec![])));
+        }
+        let ids: Vec<u64> = lock(&cache).entries.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, [2, 3], "最も前に使った 1 は捨てられる");
+    }
+
+    /// A used image counts as recent, so the unused one is dropped
+    #[test]
+    fn decoded_cache_usage_makes_an_entry_recent() {
+        let cache = Mutex::new(DecodedCache::default());
+        DecodedCache::get_or_decode(&cache, 1, || Some((1, 1, vec![])));
+        DecodedCache::get_or_decode(&cache, 2, || Some((2, 1, vec![])));
+        // Use 1 again (decode is not called)
+        assert!(DecodedCache::get_or_decode(&cache, 1, || Some((9, 1, vec![]))).is_some());
+        DecodedCache::get_or_decode(&cache, 3, || Some((3, 1, vec![])));
+        let ids: Vec<u64> = lock(&cache).entries.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, [1, 3], "使われていない 2 が捨てられる");
+    }
+
+    /// Even if two threads decode the same image and both remember it, it takes only one entry
+    #[test]
+    fn decoded_cache_keeps_one_entry_per_image() {
+        let mut cache = DecodedCache::default();
+        cache.remember(1, None);
+        cache.remember(1, None);
+        let ids: Vec<u64> = cache.entries.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, [1]);
+    }
+
+    /// A failed result (None) is remembered too, and decode is not called again
+    #[test]
+    fn decoded_cache_remembers_failed_reads() {
+        let cache = Mutex::new(DecodedCache::default());
+        let mut calls = 0;
+        let mut read = || {
+            DecodedCache::get_or_decode(&cache, 1, || {
+                calls += 1;
+                None
+            })
+        };
+        assert!(read().is_none());
+        assert!(read().is_none());
+        assert_eq!(calls, 1, "読めなかった結果も覚えている");
     }
 
     /// Decodes a PNG back into (width, height, RGB pixels)

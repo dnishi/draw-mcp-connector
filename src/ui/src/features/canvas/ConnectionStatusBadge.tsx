@@ -5,7 +5,7 @@ import {
   WifiOff,
   type LucideIcon,
 } from 'lucide-react';
-import { cn } from 'cn';
+import { cn } from '@/lib/utils';
 import type { ConnectionStatus } from './types';
 
 /** Color scheme of a state (background and text) */

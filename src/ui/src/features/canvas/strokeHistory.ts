@@ -2,6 +2,7 @@ import {
   applyCanvasOp,
   applyCanvasOps,
   applySheetOp,
+  type SheetOp,
   type StrokeOp,
 } from '../sync/canvasOp';
 import {
@@ -51,13 +52,21 @@ export interface SheetState {
   redoStack: readonly Operation[];
 }
 
+/** An operation made on this page that the PC has not acked yet */
+export interface PendingOp {
+  seq: number;
+  op: CanvasOp;
+}
+
 export interface StrokeHistoryState {
   /** In order */
   sheets: readonly SheetState[];
   /** ID of the current sheet */
   current: string;
-  /** Changes this page made in the last action. Sent to the PC */
-  outgoing: readonly CanvasOp[];
+  /** Operations made on this page that the PC has not acked yet, oldest first */
+  pending: readonly PendingOp[];
+  /** The next number to give. Starts at 1 */
+  nextSeq: number;
 }
 
 /** The current sheet. `current` is always present in `sheets` */
@@ -103,37 +112,20 @@ export type StrokeHistoryAction =
       sheets: readonly Sheet[];
       current: string;
     }
-  /** The whole canvas sent by bridges up to v0.3.0 (only the current sheet's contents) */
-  | {
-      type: 'legacySnapshot';
-      strokes: readonly Stroke[];
-      image?: ImagePlacement | null;
-    }
-  /** A change from bridges up to v0.3.0 (without sheet). Treated as a change to the current sheet */
-  | { type: 'legacyRemote'; op: LegacyCanvasOp };
-
-/** Stroke and image changes without `sheet` (bridges up to v0.3.0) */
-export type LegacyCanvasOp = LegacyOf<
-  Extract<
-    CanvasOp,
-    {
-      type: 'insert' | 'remove' | 'replace' | 'setImage' | 'removeImage';
-    }
-  >
->;
-type LegacyOf<T> = T extends CanvasOp ? Omit<T, 'sheet'> : never;
+  /** The PC reports it handled (applied or ignored) the operation with this number.
+      Removes the operations with this number or lower from pending */
+  | { type: 'ack'; seq: number };
 
 export type RemoteAction = Extract<
   StrokeHistoryAction,
-  { type: 'remote' | 'snapshot' | 'legacyRemote' | 'legacySnapshot' }
+  { type: 'remote' | 'snapshot' | 'ack' }
 >;
-
-const NO_OPS: readonly CanvasOp[] = [];
 
 export const initialStrokeHistory: StrokeHistoryState = {
   sheets: [emptySheet(INITIAL_SHEET_ID)],
   current: INITIAL_SHEET_ID,
-  outgoing: NO_OPS,
+  pending: [],
+  nextSeq: 1,
 };
 
 /**
@@ -263,54 +255,69 @@ function toOperation(
   return erased.length > 0 ? { type: 'erase', erased, remaining } : null;
 }
 
-/** Replaces the current sheet and leaves the changes to send to the PC in outgoing */
-function commit(
+/** Sheet changes (addSheet / removeSheet / selectSheet / resetSheets) */
+const isSheetOp = (op: CanvasOp): op is SheetOp =>
+  op.type === 'addSheet' ||
+  op.type === 'removeSheet' ||
+  op.type === 'selectSheet' ||
+  op.type === 'resetSheets';
+
+/** Numbers ops in order, starting from `from` */
+const numbered = (from: number, ops: readonly CanvasOp[]): PendingOp[] =>
+  ops.map((op, i) => ({ seq: from + i, op }));
+
+/** Replaces one sheet (pending is not changed) */
+function replaceSheet(
   state: StrokeHistoryState,
   sheet: SheetState,
-  outgoing: readonly CanvasOp[],
 ): StrokeHistoryState {
   return {
     ...state,
     sheets: state.sheets.map((s) => (s.id === sheet.id ? sheet : s)),
-    outgoing,
   };
 }
 
-/**
- * Makes one sheet follow the PC's contents. Strokes only this page has (such as ones written before the PC
- * restarted) are kept and sent back to the PC. The PC's image wins, but an image only this page has
- * (after the PC restarted, for example) is sent back. history is kept as is (only when the PC's image is
- * adopted and the image changes are the image actions removed)
- */
-function mergeSheetContents(
-  sheet: SheetState,
-  remoteStrokes: readonly Stroke[],
-  remoteImage: ImagePlacement | null,
-): { sheet: SheetState; outgoing: CanvasOp[] } {
-  const remoteIds = new Set(remoteStrokes.map(({ id }) => id));
-  const localOnly = sheet.strokes.filter(({ id }) => !remoteIds.has(id));
-  const outgoing: CanvasOp[] = localOnly.map((stroke, i): CanvasOp => ({
-    type: 'insert',
-    sheet: sheet.id,
-    stroke,
-    index: remoteStrokes.length + i,
-  }));
-  const image = remoteImage ?? sheet.image;
-  if (!remoteImage && sheet.image) {
-    outgoing.push({ type: 'setImage', sheet: sheet.id, image: sheet.image });
-  }
-  const next: SheetState = {
-    ...sheet,
-    strokes: [...remoteStrokes, ...localOnly],
-    image,
-  };
+/** Appends numbered ops to pending (operations this page sends to the PC) */
+function appendOps(
+  state: StrokeHistoryState,
+  ops: readonly CanvasOp[],
+): StrokeHistoryState {
   return {
-    sheet:
-      remoteImage && !samePlacement(sheet.image, remoteImage)
-        ? dropImageHistory(next)
-        : next,
-    outgoing,
+    ...state,
+    pending: [...state.pending, ...numbered(state.nextSeq, ops)],
+    nextSeq: state.nextSeq + ops.length,
   };
+}
+
+/** Replaces the current sheet and appends ops, numbered, to pending */
+function commit(
+  state: StrokeHistoryState,
+  sheet: SheetState,
+  ops: readonly CanvasOp[],
+): StrokeHistoryState {
+  return appendOps(replaceSheet(state, sheet), ops);
+}
+
+/** Operations that change a sheet's contents (strokes and image) */
+type ContentOp =
+  StrokeOp | Extract<CanvasOp, { type: 'setImage' | 'removeImage' }>;
+
+/**
+ * Applies an operation to one sheet's contents (strokes and image). null if nothing changes.
+ * The caller manages the undo/redo history
+ */
+function applyContentOp(sheet: SheetState, op: ContentOp): SheetState | null {
+  if (op.type === 'setImage' || op.type === 'removeImage') {
+    const image = op.type === 'setImage' ? op.image : null;
+    // Nothing to do if the image did not change
+    if (samePlacement(sheet.image, image)) {
+      return null;
+    }
+    return { ...sheet, image };
+  }
+  const strokes = applyCanvasOp(sheet.strokes, op);
+  // Nothing to do for the same stroke change (such as our own change coming back through the bridge)
+  return strokes === sheet.strokes ? null : { ...sheet, strokes };
 }
 
 export function strokeHistoryReducer(
@@ -325,16 +332,16 @@ export function strokeHistoryReducer(
       if (!op) {
         return state;
       }
-      const outgoing = forward(sheet.strokes, op, sheet.id);
+      const ops = forward(sheet.strokes, op, sheet.id);
       return commit(
         state,
         {
           ...sheet,
-          strokes: applyCanvasOps(sheet.strokes, outgoing),
+          strokes: applyCanvasOps(sheet.strokes, ops),
           undoStack: [...sheet.undoStack, op],
           redoStack: [],
         },
-        outgoing,
+        ops,
       );
     }
     case 'image': {
@@ -376,16 +383,16 @@ export function strokeHistoryReducer(
           imageOps(sheet.id, op.before),
         );
       }
-      const outgoing = backward(op, sheet.id);
+      const ops = backward(op, sheet.id);
       return commit(
         state,
         {
           ...sheet,
-          strokes: applyCanvasOps(sheet.strokes, outgoing),
+          strokes: applyCanvasOps(sheet.strokes, ops),
           undoStack: sheet.undoStack.slice(0, -1),
           redoStack: [...sheet.redoStack, op],
         },
-        outgoing,
+        ops,
       );
     }
     case 'redo': {
@@ -406,16 +413,16 @@ export function strokeHistoryReducer(
           imageOps(sheet.id, op.after),
         );
       }
-      const outgoing = forward(sheet.strokes, op, sheet.id);
+      const ops = forward(sheet.strokes, op, sheet.id);
       return commit(
         state,
         {
           ...sheet,
-          strokes: applyCanvasOps(sheet.strokes, outgoing),
+          strokes: applyCanvasOps(sheet.strokes, ops),
           undoStack: [...sheet.undoStack, op],
           redoStack: sheet.redoStack.slice(0, -1),
         },
-        outgoing,
+        ops,
       );
     }
     case 'clear': {
@@ -428,7 +435,7 @@ export function strokeHistoryReducer(
       if (empty) {
         return state;
       }
-      const outgoing: CanvasOp[] =
+      const ops: CanvasOp[] =
         sheet.strokes.length > 0
           ? [
               {
@@ -439,7 +446,7 @@ export function strokeHistoryReducer(
             ]
           : [];
       if (sheet.image) {
-        outgoing.push({ type: 'removeImage', sheet: sheet.id });
+        ops.push({ type: 'removeImage', sheet: sheet.id });
       }
       return commit(
         state,
@@ -450,7 +457,7 @@ export function strokeHistoryReducer(
           undoStack: [],
           redoStack: [],
         },
-        outgoing,
+        ops,
       );
     }
     case 'newSheet': {
@@ -480,15 +487,13 @@ export function strokeHistoryReducer(
       if (!selected) {
         return state;
       }
-      return {
-        ...state,
-        sheets: selected.sheets,
-        current: selected.current,
-        outgoing: [
+      return appendOps(
+        { ...state, sheets: selected.sheets, current: selected.current },
+        [
           { type: 'addSheet', id: action.id, index },
           { type: 'selectSheet', id: action.id },
         ],
-      };
+      );
     }
     case 'selectSheet': {
       const applied = applySheetOp(
@@ -499,11 +504,9 @@ export function strokeHistoryReducer(
         isEmptySheet,
       );
       return applied
-        ? {
-            ...state,
-            current: applied.current,
-            outgoing: [{ type: 'selectSheet', id: action.id }],
-          }
+        ? appendOps({ ...state, current: applied.current }, [
+            { type: 'selectSheet', id: action.id },
+          ])
         : state;
     }
     case 'removeSheet': {
@@ -515,12 +518,10 @@ export function strokeHistoryReducer(
         isEmptySheet,
       );
       return applied
-        ? {
-            ...state,
-            sheets: applied.sheets,
-            current: applied.current,
-            outgoing: [{ type: 'removeSheet', id: state.current }],
-          }
+        ? appendOps(
+            { ...state, sheets: applied.sheets, current: applied.current },
+            [{ type: 'removeSheet', id: state.current }],
+          )
         : state;
     }
     case 'resetSheets': {
@@ -532,87 +533,82 @@ export function strokeHistoryReducer(
         isEmptySheet,
       );
       return applied
-        ? {
-            ...state,
-            sheets: applied.sheets,
-            current: applied.current,
-            outgoing: [{ type: 'resetSheets' }],
-          }
+        ? appendOps(
+            { ...state, sheets: applied.sheets, current: applied.current },
+            [{ type: 'resetSheets' }],
+          )
         : state;
     }
     case 'remote':
       return applyRemoteOp(state, action.op);
     case 'snapshot': {
-      const outgoing: CanvasOp[] = [];
-      const sheets: SheetState[] = [];
-      // Sheets the PC also has follow the PC's order and contents
-      for (const remote of action.sheets) {
-        const local = state.sheets.find(({ id }) => id === remote.id);
-        if (!local) {
-          // A sheet this page does not have (made on another page, for example) takes the PC's contents as is
-          sheets.push({
-            ...emptySheet(remote.id),
-            strokes: remote.strokes,
-            image: remote.image ?? null,
-          });
+      // Match the list, order and contents (strokes and images) of sheets and the current sheet to the PC.
+      // If this page has a sheet with the same ID, keep its undo/redo history.
+      // Sheets the PC does not have are dropped
+      let sheets: readonly SheetState[] = action.sheets.map((remote) => ({
+        ...(state.sheets.find(({ id }) => id === remote.id) ??
+          emptySheet(remote.id)),
+        strokes: remote.strokes,
+        image: remote.image ?? null,
+      }));
+      let current = action.current;
+      // On top of that, reapply the operations without an ack, oldest first.
+      // Only the contents change (nothing is added to the history), and operations that cannot be applied are ignored
+      for (const { op } of state.pending) {
+        if (isSheetOp(op)) {
+          const applied = applySheetOp(
+            sheets,
+            current,
+            op,
+            emptySheet,
+            isEmptySheet,
+          );
+          if (applied) {
+            sheets = applied.sheets;
+            current = applied.current;
+          }
           continue;
         }
-        const merged = mergeSheetContents(
-          local,
-          remote.strokes,
-          remote.image ?? null,
-        );
-        sheets.push(merged.sheet);
-        outgoing.push(...merged.outgoing);
+        const index = sheets.findIndex(({ id }) => id === op.sheet);
+        if (index < 0) {
+          continue;
+        }
+        const next = applyContentOp(sheets[index], op);
+        if (next) {
+          sheets = sheets.with(index, next);
+        }
       }
-      // Sheets only this page has: kept at the end and sent back if they have contents (strokes or an image); discarded if empty
-      let room = MAX_SHEETS - action.sheets.length;
-      for (const local of state.sheets) {
-        if (action.sheets.some(({ id }) => id === local.id) || room <= 0) {
-          continue;
-        }
-        if (isEmptySheet(local)) {
-          continue;
-        }
-        const merged = mergeSheetContents(local, [], null);
-        outgoing.push({ type: 'addSheet', id: local.id, index: sheets.length });
-        outgoing.push(...merged.outgoing);
-        sheets.push(merged.sheet);
-        room--;
-      }
+      // Drop the image history only on sheets whose image after reapplying differs from this page's original image
       return {
-        sheets,
-        current: action.current,
-        outgoing: outgoing.length > 0 ? outgoing : NO_OPS,
+        sheets: sheets.map((sheet) => {
+          const original = state.sheets.find(({ id }) => id === sheet.id);
+          return original && !samePlacement(original.image, sheet.image)
+            ? dropImageHistory(sheet)
+            : sheet;
+        }),
+        current,
+        // Keep pending and nextSeq as they are (the sync side resends them)
+        pending: state.pending,
+        nextSeq: state.nextSeq,
       };
     }
-    case 'legacySnapshot': {
-      const sheet = currentSheet(state);
-      const merged = mergeSheetContents(
-        sheet,
-        action.strokes,
-        action.image ?? null,
-      );
-      return commit(state, merged.sheet, merged.outgoing);
-    }
-    case 'legacyRemote': {
-      // Changes from old bridges without sheet are treated as changes to the current sheet
-      return applyRemoteOp(state, { ...action.op, sheet: state.current });
+    case 'ack': {
+      const pending = state.pending.filter(({ seq }) => seq > action.seq);
+      // Nothing changes when there is nothing to remove
+      return pending.length === state.pending.length
+        ? state
+        : { ...state, pending };
     }
   }
 }
 
-/** Applies a change from the PC (not added to the undo history). Changes to missing sheets are ignored */
+/** Applies a change from the PC (not added to the undo history).
+    Changes to an unknown sheet are ignored. pending is not changed */
 function applyRemoteOp(
   state: StrokeHistoryState,
   op: CanvasOp,
 ): StrokeHistoryState {
-  if (
-    op.type === 'addSheet' ||
-    op.type === 'removeSheet' ||
-    op.type === 'selectSheet' ||
-    op.type === 'resetSheets'
-  ) {
+  if (isSheetOp(op)) {
     const applied = applySheetOp(
       state.sheets,
       state.current,
@@ -621,43 +617,18 @@ function applyRemoteOp(
       isEmptySheet,
     );
     return applied
-      ? {
-          ...state,
-          sheets: applied.sheets,
-          current: applied.current,
-          outgoing: NO_OPS,
-        }
+      ? { ...state, sheets: applied.sheets, current: applied.current }
       : state;
   }
   const sheet = state.sheets.find(({ id }) => id === op.sheet);
   if (!sheet) {
     return state;
   }
-  if (op.type === 'setImage' || op.type === 'removeImage') {
-    const image = op.type === 'setImage' ? op.image : null;
-    // Nothing to do if the image did not change
-    if (samePlacement(sheet.image, image)) {
-      return state;
-    }
-    // Only when the image changed, remove the image history of that sheet
-    return replaceSheet(state, dropImageHistory({ ...sheet, image }));
-  }
-  const strokes = applyCanvasOp(sheet.strokes, op);
-  // Nothing to do for the same stroke change (such as our own change coming back through the bridge)
-  if (strokes === sheet.strokes) {
+  const next = applyContentOp(sheet, op);
+  if (!next) {
     return state;
   }
-  return replaceSheet(state, { ...sheet, strokes });
-}
-
-/** Replaces one sheet (outgoing is not sent) */
-function replaceSheet(
-  state: StrokeHistoryState,
-  sheet: SheetState,
-): StrokeHistoryState {
-  return {
-    ...state,
-    sheets: state.sheets.map((s) => (s.id === sheet.id ? sheet : s)),
-    outgoing: NO_OPS,
-  };
+  // Only when the image changed, remove the image history of that sheet
+  const imageChanged = op.type === 'setImage' || op.type === 'removeImage';
+  return replaceSheet(state, imageChanged ? dropImageHistory(next) : next);
 }

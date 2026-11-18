@@ -58,7 +58,7 @@ export function CanvasPage({ connectionInfo = null }: CanvasPageProps) {
     error,
     history,
     pointerHandlers,
-    outgoing,
+    pending,
     applyRemote,
     eraserCursorRef,
     imageFrameRef,
@@ -97,12 +97,11 @@ export function CanvasPage({ connectionInfo = null }: CanvasPageProps) {
     superseded,
     dismissSuperseded,
     sendToAi,
-    singleSheet,
   } = useBridgeSync({
     info: connectionInfo,
     viewport,
     page,
-    outgoing,
+    pending,
     applyRemote,
     images,
   });
@@ -275,12 +274,10 @@ export function CanvasPage({ connectionInfo = null }: CanvasPageProps) {
           onImageDelete={() => setImage(null)}
         />
 
-        {/* Sheet switcher, overlaid at the top right. Hidden while syncing with an old bridge (which handles a single sheet) */}
-        {!singleSheet && (
-          <div className="absolute top-4 right-4">
-            <SheetSwitcher sheets={sheets} />
-          </div>
-        )}
+        {/* Sheet switcher, overlaid at the top right */}
+        <div className="absolute top-4 right-4">
+          <SheetSwitcher sheets={sheets} />
+        </div>
         {notice && (
           <p
             role="alert"

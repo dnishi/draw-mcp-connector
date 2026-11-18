@@ -10,8 +10,9 @@ use serde::{Deserialize, Serialize};
 use crate::color;
 
 /// Version of the page–bridge protocol. The page sends it in hello, and the bridge rejects a different one.
-/// Pages from before sheets do not send it, so it is taken as 0
-pub const PROTOCOL_VERSION: u32 = 1;
+/// Pages from before sheets do not send it, so it is taken as 0.
+/// From 2, operations carry a seq and the bridge returns an ack
+pub const PROTOCOL_VERSION: u32 = 2;
 /// Maximum number of sheets
 pub const MAX_SHEETS: usize = 50;
 /// ID of the first sheet, and of the sheet left after deleting all sheets. The bridge and the page start with
@@ -162,9 +163,10 @@ pub enum ClientMessage {
         #[serde(default)]
         page: Option<PageSize>,
     },
-    Op {
-        op: CanvasOp,
-    },
+    /// An operation made on the page. seq is the number the page gives each operation (increasing within the page).
+    /// After handling the operation (applied or ignored), the bridge returns an `Ack` with the same number.
+    /// After reconnecting, the page resends the operations without an ack, with the same numbers
+    Op { op: CanvasOp, seq: u64 },
     /// Send to AI was pressed. Tells the AI (MCP's wait_for_canvas)
     SendToAi,
 }
@@ -188,10 +190,8 @@ pub enum ServerMessage {
     Superseded,
     /// The connection was closed from the PC's menu. The connection is closed after this
     Disconnected,
-    /// Approved. The whole canvas held by the bridge (the sheets and the current sheet's ID). The page follows it:
-    /// sheets only it has (such as ones written before the bridge restarted) are sent back with addSheet and insert
-    /// if they have contents, and empty ones are discarded. The current sheet is the bridge's.
-    /// The bridge's images win, but an image only the page has is sent back with setImage.
+    /// Approved. The whole canvas the bridge has (the list of sheets and the current sheet ID). The page replaces its own with it,
+    /// then reapplies and resends its operations that have no ack yet.
     /// If the page lacks the bytes of a bridge image, it receives them with an ImageStream request
     Snapshot {
         /// Sheets (in stacking order)
@@ -201,6 +201,11 @@ pub enum ServerMessage {
     },
     Op {
         op: CanvasOp,
+    },
+    /// Reports that an `Op` was handled (applied or ignored). The page removes the operations up to
+    /// this number from those to resend
+    Ack {
+        seq: u64,
     },
     /// Whether the AI is waiting in wait_for_canvas (waiting) and whether a Send to AI press has not been
     /// picked up by the AI yet (queued). Sent when syncing starts (right after snapshot) and when it changes
@@ -232,7 +237,7 @@ mod tests {
         // Append the constants after the types (doc is the same text as the Rust comment)
         output.push_str(&typescript::constant(
             "PROTOCOL_VERSION",
-            "Version of the page–bridge protocol. The page sends it in hello, and the bridge rejects a different one.\nPages from before sheets do not send it, so it is taken as 0",
+            "Version of the page–bridge protocol. The page sends it in hello, and the bridge rejects a different one.\nPages from before sheets do not send it, so it is taken as 0.\nFrom 2, operations carry a seq and the bridge returns an ack",
             &serde_json::to_value(PROTOCOL_VERSION).unwrap(),
         ));
         output.push_str(&typescript::constant(

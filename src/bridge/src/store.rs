@@ -5,6 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -295,12 +296,24 @@ fn remove_unplaced_images(inner: &mut Inner, file: &FileFormat) -> io::Result<()
 }
 
 /// Writes to `.tmp` and then renames it (if writing is cut off, the previous file remains).
-/// Replaces an existing file too (also on Windows)
+/// An existing file is replaced too (also on Windows).
+/// fsyncs before renaming (if the power fails before the data reaches the disk,
+/// an empty file would be left)
 fn write_tmp_and_rename(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut tmp = path.as_os_str().to_os_string();
     tmp.push(".tmp");
-    std::fs::write(&tmp, bytes)?;
+    {
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+    }
     std::fs::rename(&tmp, path)?;
+    // On Unix, also fsync the parent folder so the rename itself is persisted
+    // (not on Windows, where a folder cannot be opened with File::open)
+    #[cfg(unix)]
+    if let Some(dir) = path.parent() {
+        std::fs::File::open(dir)?.sync_all()?;
+    }
     Ok(())
 }
 

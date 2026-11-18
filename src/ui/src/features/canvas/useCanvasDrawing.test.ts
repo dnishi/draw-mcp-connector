@@ -130,8 +130,20 @@ describe('useCanvasDrawing', () => {
 
     const moved = placement('img', 50, 40);
     expect(result.current.image).toEqual(moved);
-    expect(result.current.outgoing).toEqual([
-      { type: 'setImage', sheet: INITIAL_SHEET_ID, image: moved },
+    // Both the place and move operations remain in pending
+    expect(result.current.pending).toEqual([
+      {
+        seq: 1,
+        op: {
+          type: 'setImage',
+          sheet: INITIAL_SHEET_ID,
+          image: placement('img'),
+        },
+      },
+      {
+        seq: 2,
+        op: { type: 'setImage', sheet: INITIAL_SHEET_ID, image: moved },
+      },
     ]);
   });
 
@@ -139,7 +151,7 @@ describe('useCanvasDrawing', () => {
     it('画像の上を動かさずに押して離すとクリックとして知らせ、画像は動かさない', () => {
       const { result, imageEvents, press } = setup();
       act(() => result.current.setImage(placement('img')));
-      const before = result.current.outgoing;
+      const before = result.current.pending;
 
       press({ x: 50, y: 30 });
 
@@ -150,7 +162,7 @@ describe('useCanvasDrawing', () => {
       });
       expect(imageEvents.onGestureStart).not.toHaveBeenCalled();
       expect(result.current.image).toEqual(placement('img'));
-      expect(result.current.outgoing).toBe(before);
+      expect(result.current.pending).toBe(before);
     });
 
     it('少しの揺れ(CLICK_SLOP 以内)なら、クリックのまま', () => {
@@ -230,7 +242,7 @@ describe('useCanvasDrawing', () => {
       ),
     );
 
-    expect(result.current.outgoing).toEqual([]);
+    expect(result.current.pending).toEqual([]);
     expect(result.current.canClear).toBe(false);
   });
 
@@ -239,7 +251,7 @@ describe('useCanvasDrawing', () => {
 
     press({ x: 10, y: 10 }, { x: 40, y: 40 });
 
-    expect(result.current.outgoing).toEqual([]);
+    expect(result.current.pending).toEqual([]);
     expect(result.current.canClear).toBe(false);
   });
 

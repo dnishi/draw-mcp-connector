@@ -1,5 +1,5 @@
 import { Popover } from '@base-ui/react/popover';
-import { cn } from 'cn';
+import { cn } from '@/lib/utils';
 import { Trash2 } from 'lucide-react';
 import { useState, type RefObject } from 'react';
 import { Button } from '@/components/ui/button';

@@ -29,6 +29,8 @@ enum UserEvent {
     ShowQr,
     /// The connection state with the canvas changed (read the current state from app.status)
     Status,
+    /// The QR contents (address or token) changed (redraws an open QR window)
+    Pairing,
 }
 
 fn badge(status: LinkStatus) -> Badge {
@@ -349,6 +351,10 @@ pub fn run(app: Arc<App>, start: impl FnOnce()) -> ! {
     app.status.set_listener(move || {
         let _ = proxy.send_event(UserEvent::Status);
     });
+    let proxy = event_loop.create_proxy();
+    app.pairing.set_listener(move || {
+        let _ = proxy.send_event(UserEvent::Pairing);
+    });
     start();
 
     let items = MenuItems {
@@ -393,6 +399,12 @@ pub fn run(app: Arc<App>, start: impl FnOnce()) -> ! {
                 // Once connected, the QR code is no longer needed
                 if matches!(status, LinkStatus::Connected(_)) {
                     qr_window.take();
+                }
+            }
+            Event::UserEvent(UserEvent::Pairing) => {
+                // The QR contents changed: if the window is open, redraw it with the new contents
+                if let Some(window) = &qr_window {
+                    window.request_redraw();
                 }
             }
             Event::UserEvent(UserEvent::Menu(event)) if event.id == *items.show_qr.id() => {

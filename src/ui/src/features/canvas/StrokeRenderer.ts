@@ -1,9 +1,10 @@
-import { FLOATS_PER_VERTEX } from './strokeMesh';
+import { FLOATS_PER_VERTEX, type CommittedVertices } from './strokeMesh';
 import type { View } from './view';
 
 // TypeScript 7's lib.dom.d.ts does not declare GPUBufferUsage / GPUTextureUsage.
 // They exist in browsers (namespaces in the WebGPU spec, https://www.w3.org/TR/webgpu/), so only their types are declared
 declare const GPUBufferUsage: {
+  readonly COPY_SRC: number;
   readonly COPY_DST: number;
   readonly VERTEX: number;
   readonly UNIFORM: number;
@@ -228,7 +229,13 @@ export class StrokeRenderer {
   readonly #sampler: GPUSampler;
   readonly #viewportBuffer: GPUBuffer;
   readonly #bindGroup: GPUBindGroup;
-  #vertexBuffer: GPUBuffer | null = null;
+  // Vertices of committed strokes change only on append or rebuild, so they are kept
+  // apart from the buffer of the stroke being drawn (rewritten every frame)
+  #committedVertexBuffer: GPUBuffer | null = null;
+  /** Number of floats of vertices in the committed strokes buffer */
+  #committedVertexFloats = 0;
+  /** Buffer of the stroke being drawn */
+  #activeVertexBuffer: GPUBuffer | null = null;
   #msaaTexture: GPUTexture | null = null;
   #devicePixelRatio = 1;
   #imageBitmap: ImageBitmap | null = null;
@@ -401,10 +408,19 @@ export class StrokeRenderer {
   }
 
   /**
-   * Redraws the whole screen with vertices (triangle-list, canvas coordinates) at the zoom and position of view.
-   * The order is white background → grid → image (image, under the strokes) → strokes
+   * Redraws the whole screen with the committed strokes (committed) and the stroke being drawn (active, triangle-list, canvas coordinates)
+   * at the zoom and position of view.
+   * Order: white background → grid → image (image, below the strokes) → committed strokes → stroke being drawn
    */
-  draw(vertices: Float32Array, view: View, image?: ImageUnderlay): void {
+  draw(
+    committed: CommittedVertices,
+    active: Float32Array,
+    view: View,
+    image?: ImageUnderlay,
+  ): void {
+    // Apply changes to the committed strokes to the buffer even before drawing is ready (msaaTexture).
+    // committed is the difference from the previous frame, so dropping it would leave later frames without those strokes
+    const committedVertexCount = this.#updateCommittedVertices(committed);
     if (!this.#msaaTexture) {
       return;
     }
@@ -429,8 +445,10 @@ export class StrokeRenderer {
         new Float32Array([lod]),
       );
     }
-    const vertexCount = vertices.length / FLOATS_PER_VERTEX;
-    const vertexBuffer = vertexCount > 0 ? this.#writeVertices(vertices) : null;
+    const committedBuffer = this.#committedVertexBuffer;
+    const activeVertexCount = active.length / FLOATS_PER_VERTEX;
+    const activeBuffer =
+      activeVertexCount > 0 ? this.#writeActiveVertices(active) : null;
 
     const encoder = this.#device.createCommandEncoder();
     const pass = encoder.beginRenderPass({
@@ -460,14 +478,28 @@ export class StrokeRenderer {
       );
       pass.draw(IMAGE_VERTEX_COUNT);
     }
-    if (vertexBuffer) {
-      // The spec checks binding consistency at draw time, but to avoid setting the shared bind group
-      // (binding 0 only) under the image pipeline (which has 3 bindings with layout: 'auto'),
-      // switch the pipeline first and then set the bind group
-      pass.setPipeline(this.#pipeline);
-      pass.setBindGroup(0, this.#bindGroup);
-      pass.setVertexBuffer(0, vertexBuffer, 0, vertices.byteLength);
-      pass.draw(vertexCount);
+    // The spec checks binding consistency at draw time, but to avoid setting the shared bind group
+    // (binding 0 only) under the image pipeline (which has 3 bindings with layout: 'auto'),
+    // switch the pipeline first and then set the bind group
+    pass.setPipeline(this.#pipeline);
+    pass.setBindGroup(0, this.#bindGroup);
+    if (committedBuffer && committedVertexCount > 0) {
+      pass.setVertexBuffer(
+        0,
+        committedBuffer,
+        0,
+        committedVertexCount * BYTES_PER_VERTEX,
+      );
+      pass.draw(committedVertexCount);
+    }
+    if (activeBuffer) {
+      pass.setVertexBuffer(
+        0,
+        activeBuffer,
+        0,
+        activeVertexCount * BYTES_PER_VERTEX,
+      );
+      pass.draw(activeVertexCount);
     }
     pass.end();
     this.#device.queue.submit([encoder.finish()]);
@@ -608,21 +640,83 @@ export class StrokeRenderer {
     return this.#imageVertexBuffer;
   }
 
-  /** Writes into the vertex buffer. Recreates it twice as large when it is too small */
-  #writeVertices(vertices: Float32Array): GPUBuffer {
-    if (!this.#vertexBuffer || this.#vertexBuffer.size < vertices.byteLength) {
-      let size = this.#vertexBuffer?.size ?? MIN_VERTEX_BUFFER_BYTES;
+  /**
+   * Updates the committed strokes buffer to match CommittedVertices and returns the number of vertices to draw.
+   * Vertices are in units of floats (4 bytes), so the writeBuffer offset (bytes) and
+   * the copyBufferToBuffer size (bytes) meet the multiple-of-4 requirement
+   */
+  #updateCommittedVertices(committed: CommittedVertices): number {
+    if (committed.kind !== 'unchanged') {
+      const kept = committed.kind === 'append' ? committed.offset : 0;
+      const floats = kept + committed.data.length;
+      this.#reserveCommittedVertices(
+        floats * Float32Array.BYTES_PER_ELEMENT,
+        kept * Float32Array.BYTES_PER_ELEMENT,
+      );
+      if (this.#committedVertexBuffer && committed.data.length > 0) {
+        this.#device.queue.writeBuffer(
+          this.#committedVertexBuffer,
+          kept * Float32Array.BYTES_PER_ELEMENT,
+          committed.data,
+        );
+      }
+      this.#committedVertexFloats = floats;
+    }
+    return this.#committedVertexFloats / FLOATS_PER_VERTEX;
+  }
+
+  /**
+   * Makes the committed strokes buffer at least bytes long. If it is too small, recreates it doubling the size,
+   * and copies the first keptBytes (kept for append) to the new buffer on the GPU
+   * (without holding all vertices on the CPU again)
+   */
+  #reserveCommittedVertices(bytes: number, keptBytes: number): void {
+    const previous = this.#committedVertexBuffer;
+    if (bytes === 0 || (previous && previous.size >= bytes)) {
+      return;
+    }
+    let size = previous?.size ?? MIN_VERTEX_BUFFER_BYTES;
+    while (size < bytes) {
+      size *= 2;
+    }
+    // COPY_SRC, since it is the copy source the next time the buffer grows
+    const next = this.#device.createBuffer({
+      size,
+      usage:
+        GPUBufferUsage.VERTEX |
+        GPUBufferUsage.COPY_DST |
+        GPUBufferUsage.COPY_SRC,
+    });
+    if (previous && keptBytes > 0) {
+      const encoder = this.#device.createCommandEncoder();
+      encoder.copyBufferToBuffer(previous, 0, next, 0, keptBytes);
+      this.#device.queue.submit([encoder.finish()]);
+    }
+    // The copy command has been submitted, so destroy is safe. Per the WebGPU spec (W3C "WebGPU",
+    // note in 5.1 Buffer Destruction), the GPU memory of a destroyed buffer is freed
+    // "after all previously submitted operations using it complete"
+    previous?.destroy();
+    this.#committedVertexBuffer = next;
+  }
+
+  /** Writes to the active stroke buffer from the start. If it is too small, recreates it doubling the size */
+  #writeActiveVertices(vertices: Float32Array): GPUBuffer {
+    if (
+      !this.#activeVertexBuffer ||
+      this.#activeVertexBuffer.size < vertices.byteLength
+    ) {
+      let size = this.#activeVertexBuffer?.size ?? MIN_VERTEX_BUFFER_BYTES;
       while (size < vertices.byteLength) {
         size *= 2;
       }
 
-      this.#vertexBuffer?.destroy();
-      this.#vertexBuffer = this.#device.createBuffer({
+      this.#activeVertexBuffer?.destroy();
+      this.#activeVertexBuffer = this.#device.createBuffer({
         size,
         usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
       });
     }
-    this.#device.queue.writeBuffer(this.#vertexBuffer, 0, vertices);
-    return this.#vertexBuffer;
+    this.#device.queue.writeBuffer(this.#activeVertexBuffer, 0, vertices);
+    return this.#activeVertexBuffer;
   }
 }

@@ -1,5 +1,6 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { PendingOp } from '../canvas/strokeHistory';
 import type { BridgeConnection, BridgeHandlers } from './bridgeClient';
 import { connectBridge } from './bridgeClient';
 import type { ConnectionInfo } from './connectionInfo';
@@ -66,28 +67,25 @@ const placement: ImagePlacement = {
 const unchanged = viewport();
 const page = { width: 800, height: 600 };
 
-function setup(outgoing: readonly CanvasOp[] = []) {
+function setup(pending: readonly PendingOp[] = []) {
   const applyRemote = vi.fn();
   const hook = renderHook(
-    ({ outgoing, viewport }) =>
+    ({ pending, viewport }) =>
       useBridgeSync({
         info,
         viewport,
         page,
-        outgoing,
+        pending,
         applyRemote,
         images: imageStore,
       }),
-    { initialProps: { outgoing, viewport: unchanged } },
+    { initialProps: { pending, viewport: unchanged } },
   );
   return { ...hook, applyRemote };
 }
 
 const receive = (message: ServerMessage) =>
   act(() => handlers.onMessage(message));
-/** The snapshot shape of bridges up to v0.3.0 (not part of the current ServerMessage type) */
-const legacySnapshot = (image?: ImagePlacement | null): ServerMessage =>
-  ({ type: 'snapshot', strokes: [], image }) as unknown as ServerMessage;
 
 describe('useBridgeSync', () => {
   it('hello を送り、許可されたら同期を始める', async () => {
@@ -120,8 +118,8 @@ describe('useBridgeSync', () => {
       sheet: INITIAL_SHEET_ID,
       ids: ['a'],
     };
-    rerender({ outgoing: [op], viewport: unchanged });
-    expect(sent.at(-1)).toEqual({ type: 'op', op });
+    rerender({ pending: [{ seq: 1, op }], viewport: unchanged });
+    expect(sent.at(-1)).toEqual({ type: 'op', op, seq: 1 });
   });
 
   it('見えている範囲が変わったら知らせる', async () => {
@@ -134,7 +132,7 @@ describe('useBridgeSync', () => {
     });
     await receive({ type: 'snapshot', sheets: [], current: INITIAL_SHEET_ID });
 
-    rerender({ outgoing: [], viewport: viewport(120) });
+    rerender({ pending: [], viewport: viewport(120) });
 
     expect(sent.at(-1)).toEqual({
       type: 'resize',
@@ -147,7 +145,9 @@ describe('useBridgeSync', () => {
     const { rerender } = setup();
     await waitFor(() => expect(sent).toHaveLength(1));
     rerender({
-      outgoing: [{ type: 'remove', sheet: INITIAL_SHEET_ID, ids: ['a'] }],
+      pending: [
+        { seq: 1, op: { type: 'remove', sheet: INITIAL_SHEET_ID, ids: ['a'] } },
+      ],
       viewport: unchanged,
     });
     expect(sent).toHaveLength(1);
@@ -276,7 +276,7 @@ describe('useBridgeSync', () => {
         info: null,
         viewport: unchanged,
         page,
-        outgoing: [],
+        pending: [],
         applyRemote: vi.fn(),
         images: imageStore,
       }),
@@ -286,60 +286,76 @@ describe('useBridgeSync', () => {
     expect(result.current.reconnect).toBeNull();
   });
 
-  it('sheets のある snapshot で snapshot が、無い snapshot で legacySnapshot が渡り、singleSheet が true になる', async () => {
-    const { result, applyRemote } = setup();
+  it('ack を受けると applyRemote に渡す', async () => {
+    const { applyRemote } = setup();
     await waitFor(() => expect(sent).toHaveLength(1));
 
-    await receive({
-      type: 'snapshot',
-      sheets: [],
-      current: INITIAL_SHEET_ID,
-    });
-    expect(applyRemote).toHaveBeenCalledWith({
-      type: 'snapshot',
-      sheets: [],
-      current: INITIAL_SHEET_ID,
-    });
-    expect(result.current.singleSheet).toBe(false);
+    await receive({ type: 'ack', seq: 7 });
 
-    // Back to false on disconnect
-    act(() => handlers.onClose());
-    expect(result.current.singleSheet).toBe(false);
-
-    act(() => result.current.reconnect?.());
-    const hellos = () => sent.filter(({ type }) => type === 'hello');
-    await waitFor(() => expect(hellos()).toHaveLength(2));
-
-    await receive(legacySnapshot());
-    expect(applyRemote).toHaveBeenCalledWith({
-      type: 'legacySnapshot',
-      strokes: [],
-      image: undefined,
-    });
-    expect(result.current.singleSheet).toBe(true);
+    expect(applyRemote).toHaveBeenCalledWith({ type: 'ack', seq: 7 });
   });
 
-  it('古い bridge には紙の変更を送らない(筆跡の変更は送る)', async () => {
-    const { rerender } = setup();
+  it('切れたら、繋ぎ直すまで送らない', async () => {
+    const { result, rerender } = setup();
     await waitFor(() => expect(sent).toHaveLength(1));
-    await receive(legacySnapshot());
+    await receive({ type: 'snapshot', sheets: [], current: INITIAL_SHEET_ID });
 
+    act(() => handlers.onClose());
     rerender({
-      outgoing: [
-        { type: 'remove', sheet: INITIAL_SHEET_ID, ids: ['a'] },
-        { type: 'addSheet', id: 's2', index: 1 },
-        { type: 'selectSheet', id: 's2' },
-        { type: 'removeSheet', id: 's2' },
-        { type: 'resetSheets' },
+      pending: [
+        { seq: 1, op: { type: 'remove', sheet: INITIAL_SHEET_ID, ids: ['a'] } },
       ],
       viewport: unchanged,
     });
 
+    expect(sent.filter((message) => message.type === 'op')).toEqual([]);
+    expect(result.current.reconnect).not.toBeNull();
+  });
+
+  it('繋ぎ直して snapshot を受けると、ack の来ていない操作が同じ seq で送り直される。ack が来た操作は送られない', async () => {
+    const { result, rerender } = setup();
+    await waitFor(() => expect(sent).toHaveLength(1));
+    await receive({ type: 'snapshot', sheets: [], current: INITIAL_SHEET_ID });
+
+    const op1: CanvasOp = {
+      type: 'remove',
+      sheet: INITIAL_SHEET_ID,
+      ids: ['a'],
+    };
+    const op2: CanvasOp = {
+      type: 'remove',
+      sheet: INITIAL_SHEET_ID,
+      ids: ['b'],
+    };
+    rerender({
+      pending: [
+        { seq: 1, op: op1 },
+        { seq: 2, op: op2 },
+      ],
+      viewport: unchanged,
+    });
     expect(sent.filter((message) => message.type === 'op')).toEqual([
-      {
-        type: 'op',
-        op: { type: 'remove', sheet: INITIAL_SHEET_ID, ids: ['a'] },
-      },
+      { type: 'op', op: op1, seq: 1 },
+      { type: 'op', op: op2, seq: 2 },
+    ]);
+
+    // ack 1 arrives and operation 1 is removed from pending. 2 is still there
+    await receive({ type: 'ack', seq: 1 });
+    rerender({ pending: [{ seq: 2, op: op2 }], viewport: unchanged });
+    expect(sent.filter((message) => message.type === 'op')).toHaveLength(2);
+
+    // Disconnect and reconnect
+    act(() => handlers.onClose());
+    act(() => result.current.reconnect?.());
+    const hellos = () => sent.filter(({ type }) => type === 'hello');
+    await waitFor(() => expect(hellos()).toHaveLength(2));
+    await receive({ type: 'snapshot', sheets: [], current: INITIAL_SHEET_ID });
+
+    // Only operation 2 is resent, with the same seq
+    expect(sent.filter((message) => message.type === 'op')).toEqual([
+      { type: 'op', op: op1, seq: 1 },
+      { type: 'op', op: op2, seq: 2 },
+      { type: 'op', op: op2, seq: 2 },
     ]);
   });
 
@@ -375,8 +391,11 @@ describe('useBridgeSync', () => {
       imageStore.seed('img', new Uint8Array([1, 2, 3]));
 
       rerender({
-        outgoing: [
-          { type: 'setImage', sheet: INITIAL_SHEET_ID, image: placement },
+        pending: [
+          {
+            seq: 1,
+            op: { type: 'setImage', sheet: INITIAL_SHEET_ID, image: placement },
+          },
         ],
         viewport: unchanged,
       });
@@ -385,6 +404,7 @@ describe('useBridgeSync', () => {
       expect(sent.at(-1)).toEqual({
         type: 'op',
         op: { type: 'setImage', sheet: INITIAL_SHEET_ID, image: placement },
+        seq: 1,
       });
     });
 
@@ -400,13 +420,26 @@ describe('useBridgeSync', () => {
       const moved = { ...placement, x: 50 };
 
       rerender({
-        outgoing: [
-          { type: 'setImage', sheet: INITIAL_SHEET_ID, image: placement },
+        pending: [
+          {
+            seq: 1,
+            op: { type: 'setImage', sheet: INITIAL_SHEET_ID, image: placement },
+          },
         ],
         viewport: unchanged,
       });
+      // The move operation is queued after the earlier operation
       rerender({
-        outgoing: [{ type: 'setImage', sheet: INITIAL_SHEET_ID, image: moved }],
+        pending: [
+          {
+            seq: 1,
+            op: { type: 'setImage', sheet: INITIAL_SHEET_ID, image: placement },
+          },
+          {
+            seq: 2,
+            op: { type: 'setImage', sheet: INITIAL_SHEET_ID, image: moved },
+          },
+        ],
         viewport: unchanged,
       });
 
@@ -414,6 +447,7 @@ describe('useBridgeSync', () => {
       expect(sent.at(-1)).toEqual({
         type: 'op',
         op: { type: 'setImage', sheet: INITIAL_SHEET_ID, image: moved },
+        seq: 2,
       });
     });
 
@@ -428,11 +462,14 @@ describe('useBridgeSync', () => {
       act(() => handlers.onImageBytes('img', new Uint8Array([4])));
 
       rerender({
-        outgoing: [
+        pending: [
           {
-            type: 'setImage',
-            sheet: INITIAL_SHEET_ID,
-            image: { ...placement, x: 50 },
+            seq: 1,
+            op: {
+              type: 'setImage',
+              sheet: INITIAL_SHEET_ID,
+              image: { ...placement, x: 50 },
+            },
           },
         ],
         viewport: unchanged,

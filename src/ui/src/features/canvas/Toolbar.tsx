@@ -12,7 +12,7 @@ import {
 } from 'lucide-react';
 import { AlertDialog } from '@base-ui/react/alert-dialog';
 import { Popover } from '@base-ui/react/popover';
-import { cn } from 'cn';
+import { cn } from '@/lib/utils';
 import {
   useCallback,
   useEffect,

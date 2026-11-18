@@ -9,7 +9,8 @@ use tokio::sync::broadcast;
 
 use crate::lock::lock;
 use crate::protocol::{
-    CanvasOp, INITIAL_SHEET_ID, ImagePlacement, MAX_SHEETS, PageSize, Sheet, Stroke, Viewport,
+    Author, CanvasOp, INITIAL_SHEET_ID, ImagePlacement, MAX_SHEETS, PageSize, Sheet, Stroke,
+    Viewport,
 };
 use crate::render::StoredImage;
 
@@ -19,6 +20,11 @@ const MAX_LOG_LEN: usize = 10_000;
 /// Number of image byte arrays to keep. Used when undo/redo brings back an old ID, and
 /// for handing them to pages that connect later. The oldest are dropped first
 const MAX_IMAGE_ENTRIES: usize = 8;
+
+/// Upper limit on the total bytes of images not placed on any sheet. Placed images are the user's
+/// content, so they are never dropped by count or bytes, but images not placed are dropped,
+/// oldest first, when this total is exceeded, as with the limit on the number of images
+const MAX_UNPLACED_IMAGE_BYTES: usize = 128 * 1024 * 1024;
 
 /// Who made the change. Used to avoid sending a change back to its sender
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,15 +92,18 @@ struct ImageData {
 }
 
 impl ImageData {
-    /// Never drops the IDs of placed images. Over the limit, drops the oldest of the images
-    /// that are not placed, and drops nothing if every image is placed
+    /// IDs of placed images are never dropped. When the number of images or the total bytes of images
+    /// not placed exceeds its limit, the oldest image not placed is dropped;
+    /// if every image is placed, nothing is dropped
     fn put(&mut self, id: &str, image: Arc<StoredImage>, placed: &HashSet<String>) {
         if let Some(entry) = self.entries.iter_mut().find(|(stored, _)| stored == id) {
             entry.1 = image;
         } else {
             self.entries.push_back((id.to_string(), image));
         }
-        while self.entries.len() > MAX_IMAGE_ENTRIES {
+        while self.entries.len() > MAX_IMAGE_ENTRIES
+            || self.unplaced_bytes(placed) > MAX_UNPLACED_IMAGE_BYTES
+        {
             let Some(index) = self
                 .entries
                 .iter()
@@ -104,6 +113,15 @@ impl ImageData {
             };
             self.entries.remove(index);
         }
+    }
+
+    /// Total bytes of images not placed on any sheet
+    fn unplaced_bytes(&self, placed: &HashSet<String>) -> usize {
+        self.entries
+            .iter()
+            .filter(|(stored, _)| !placed.contains(stored))
+            .map(|(_, image)| image.bytes().len())
+            .sum()
     }
 
     fn get(&self, id: &str) -> Option<Arc<StoredImage>> {
@@ -367,8 +385,29 @@ impl Canvas {
         self.state().views.retain(|view| view.id != id);
     }
 
+    /// Reads only the revision number (without copying everything)
+    pub fn revision(&self) -> u64 {
+        self.state().revision
+    }
+
     pub fn snapshot(&self) -> Snapshot {
         self.state().snapshot()
+    }
+
+    /// For each given ID, returns the ID of the sheet holding the stroke and its author, under one lock (points are not copied)
+    pub fn stroke_owners(&self, ids: &[String]) -> Vec<Option<(String, Author)>> {
+        let state = self.state();
+        ids.iter()
+            .map(|id| {
+                state.sheets.iter().find_map(|sheet| {
+                    sheet
+                        .strokes
+                        .iter()
+                        .find(|stroke| stroke.id == *id)
+                        .map(|stroke| (sheet.id.clone(), stroke.author))
+                })
+            })
+            .collect()
     }
 
     /// Looks up a stroke by ID (searching all sheets). Returns the sheet ID and the stroke
@@ -902,6 +941,48 @@ mod tests {
         );
     }
 
+    /// When the total bytes of images not placed exceeds the limit, the oldest are dropped
+    #[test]
+    fn unplaced_image_bytes_are_limited_from_the_oldest() {
+        let canvas = Canvas::new();
+        let chunk = MAX_UNPLACED_IMAGE_BYTES / 2 + 1;
+        canvas.put_image_data("a", vec![0u8; chunk]);
+        assert!(canvas.image_data("a").is_some(), "上限までは捨てない");
+        canvas.put_image_data("b", vec![0u8; chunk]);
+        assert!(
+            canvas.image_data("a").is_none(),
+            "合計が上限を超えると古い順に捨てる"
+        );
+        assert!(canvas.image_data("b").is_some());
+        // Nothing is dropped when the total is exactly at the limit
+        canvas.put_image_data("c", vec![0u8; MAX_UNPLACED_IMAGE_BYTES - chunk]);
+        assert!(canvas.image_data("c").is_some(), "ちょうど上限なら捨てない");
+    }
+
+    /// Placed images do not count toward the total and are not dropped even beyond the limit
+    #[test]
+    fn placed_image_bytes_do_not_count_toward_the_limit() {
+        let canvas = Canvas::new();
+        canvas.apply(
+            Origin::Ai,
+            CanvasOp::SetImage {
+                sheet: INITIAL_SHEET_ID.into(),
+                image: placement("a"),
+            },
+        );
+        // Only placed images exceed the limit for images not placed
+        canvas.put_image_data("a", vec![0u8; MAX_UNPLACED_IMAGE_BYTES + 1]);
+        canvas.put_image_data("b", vec![0u8; 1]);
+        assert!(
+            canvas.image_data("a").is_some(),
+            "置かれている画像は上限を超えても捨てない"
+        );
+        assert!(
+            canvas.image_data("b").is_some(),
+            "置かれている画像を合計に数えると、置かれていない b が捨てられる"
+        );
+    }
+
     #[test]
     fn all_placed_images_are_kept_beyond_the_limit() {
         let canvas = Canvas::new();
@@ -992,5 +1073,56 @@ mod tests {
         };
         assert_eq!(revision, 2);
         assert!(ops.is_empty());
+    }
+
+    /// revision returns the same value as the snapshot's revision (to read it without copying everything)
+    #[test]
+    fn revision_matches_the_snapshot() {
+        let canvas = Canvas::new();
+        assert_eq!(canvas.revision(), 0);
+        assert_eq!(canvas.revision(), canvas.snapshot().revision);
+        canvas.apply(Origin::Ai, insert("a", 0));
+        assert_eq!(canvas.revision(), 1);
+        assert_eq!(canvas.revision(), canvas.snapshot().revision);
+    }
+
+    /// For each given ID, returns the ID of the sheet holding the stroke and its author, or None for an unknown ID
+    #[test]
+    fn stroke_owners_reports_sheet_and_author_per_id() {
+        let canvas = Canvas::new();
+        canvas.apply(
+            Origin::Ai,
+            CanvasOp::AddSheet {
+                id: "b".into(),
+                index: 0,
+            },
+        );
+        canvas.apply(
+            Origin::Ai,
+            CanvasOp::Insert {
+                sheet: "b".into(),
+                stroke: stroke("a"),
+                index: 0,
+            },
+        );
+        canvas.apply(
+            Origin::Ai,
+            CanvasOp::Insert {
+                sheet: INITIAL_SHEET_ID.into(),
+                stroke: Stroke {
+                    author: Author::Ai,
+                    ..stroke("c")
+                },
+                index: 0,
+            },
+        );
+        assert_eq!(
+            canvas.stroke_owners(&["a".into(), "c".into(), "none".into()]),
+            [
+                Some(("b".to_string(), Author::Human)),
+                Some((INITIAL_SHEET_ID.to_string(), Author::Ai)),
+                None,
+            ]
+        );
     }
 }

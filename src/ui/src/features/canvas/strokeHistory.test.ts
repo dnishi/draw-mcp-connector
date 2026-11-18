@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import type { ImagePlacement } from '../sync/protocol';
-import { INITIAL_SHEET_ID, MAX_SHEETS } from '../sync/protocol';
+import {
+  type ImagePlacement,
+  INITIAL_SHEET_ID,
+  MAX_SHEETS,
+} from '../sync/protocol';
 import type { Stroke } from './stroke';
 import {
   currentSheet,
@@ -44,6 +47,12 @@ const erase = (...erasedIds: string[]): StrokeHistoryAction => ({
   type: 'erase',
   pieces: new Map(erasedIds.map((id) => [id, []])),
 });
+/** Operations in pending (in send order) */
+const ops = (state: StrokeHistoryState) => state.pending.map(({ op }) => op);
+/** The last n operations in pending */
+const tail = (state: StrokeHistoryState, n: number) => ops(state).slice(-n);
+/** Numbers in pending */
+const seqs = (state: StrokeHistoryState) => state.pending.map(({ seq }) => seq);
 
 describe('strokeHistoryReducer', () => {
   it('描いた筆跡を取り消し・やり直しできる', () => {
@@ -76,7 +85,7 @@ describe('strokeHistoryReducer', () => {
       pieces: new Map([['b', [stroke('b1'), stroke('b2')]]]),
     });
     expect(ids(erased)).toEqual(['a', 'b1', 'b2', 'c']);
-    expect(erased.outgoing).toEqual([
+    expect(tail(erased, 3)).toEqual([
       { type: 'remove', sheet: INITIAL_SHEET_ID, ids: ['b'] },
       {
         type: 'insert',
@@ -94,7 +103,7 @@ describe('strokeHistoryReducer', () => {
 
     const undone = strokeHistoryReducer(erased, { type: 'undo' });
     expect(ids(undone)).toEqual(['a', 'b', 'c']);
-    expect(undone.outgoing).toEqual([
+    expect(tail(undone, 2)).toEqual([
       { type: 'remove', sheet: INITIAL_SHEET_ID, ids: ['b1', 'b2'] },
       {
         type: 'insert',
@@ -116,7 +125,7 @@ describe('strokeHistoryReducer', () => {
     expect(ids(cleared)).toEqual([]);
     expect(currentSheet(cleared).undoStack).toEqual([]);
     expect(currentSheet(cleared).redoStack).toEqual([]);
-    expect(cleared.outgoing).toEqual([
+    expect(tail(cleared, 1)).toEqual([
       { type: 'remove', sheet: INITIAL_SHEET_ID, ids: ['a', 'b'] },
     ]);
   });
@@ -176,7 +185,7 @@ describe('strokeHistoryReducer', () => {
         's2',
       ]);
       expect(state.current).toBe('s2');
-      expect(state.outgoing).toEqual([
+      expect(tail(state, 2)).toEqual([
         { type: 'addSheet', id: 's2', index: 1 },
         { type: 'selectSheet', id: 's2' },
       ]);
@@ -204,7 +213,7 @@ describe('strokeHistoryReducer', () => {
         id: INITIAL_SHEET_ID,
       });
       expect(switched.current).toBe(INITIAL_SHEET_ID);
-      expect(switched.outgoing).toEqual([
+      expect(tail(switched, 1)).toEqual([
         { type: 'selectSheet', id: INITIAL_SHEET_ID },
       ]);
       expect(
@@ -231,7 +240,7 @@ describe('strokeHistoryReducer', () => {
         's2',
       ]);
       expect(state.current).toBe('s2');
-      expect(state.outgoing).toEqual([{ type: 'removeSheet', id: 's3' }]);
+      expect(tail(state, 1)).toEqual([{ type: 'removeSheet', id: 's3' }]);
       expect(idsOf(state, INITIAL_SHEET_ID)).toEqual(['a']);
       expect(idsOf(state, 's2')).toEqual(['b']);
     });
@@ -250,7 +259,7 @@ describe('strokeHistoryReducer', () => {
       expect(state.sheets.map(({ id }) => id)).toEqual([INITIAL_SHEET_ID]);
       expect(state.current).toBe(INITIAL_SHEET_ID);
       expect(ids(state)).toEqual([]);
-      expect(state.outgoing).toEqual([{ type: 'resetSheets' }]);
+      expect(tail(state, 1)).toEqual([{ type: 'resetSheets' }]);
     });
 
     it('resetSheets は既に白紙の INITIAL_SHEET_ID の紙 1 枚だけなら何もしない', () => {
@@ -261,35 +270,66 @@ describe('strokeHistoryReducer', () => {
   });
 });
 
-describe('PC に送る変更(outgoing)', () => {
-  it('描く・消す・取り消すを、それぞれ PC の変更として出す(sheet 付き)', () => {
+describe('pending(このページが起こした操作のうち、ack の来ていないもの)', () => {
+  it('操作は pending に番号付きで積まれ、2 つ続けても両方残る', () => {
     const drawn = run([add('a'), add('b')]);
-    expect(drawn.outgoing).toEqual([
+    expect(drawn.pending).toEqual([
       {
-        type: 'insert',
-        sheet: INITIAL_SHEET_ID,
-        stroke: stroke('b'),
-        index: 1,
+        seq: 1,
+        op: {
+          type: 'insert',
+          sheet: INITIAL_SHEET_ID,
+          stroke: stroke('a'),
+          index: 0,
+        },
+      },
+      {
+        seq: 2,
+        op: {
+          type: 'insert',
+          sheet: INITIAL_SHEET_ID,
+          stroke: stroke('b'),
+          index: 1,
+        },
       },
     ]);
+    expect(drawn.nextSeq).toBe(3);
 
-    const erased = strokeHistoryReducer(drawn, erase('a'));
-    expect(erased.outgoing).toEqual([
-      { type: 'remove', sheet: INITIAL_SHEET_ID, ids: ['a'] },
-    ]);
-
-    const undone = strokeHistoryReducer(erased, { type: 'undo' });
-    expect(undone.outgoing).toEqual([
-      {
-        type: 'insert',
-        sheet: INITIAL_SHEET_ID,
-        stroke: stroke('a'),
-        index: 0,
-      },
+    // Undo is queued after the earlier operations
+    const undone = strokeHistoryReducer(drawn, { type: 'undo' });
+    expect(seqs(undone)).toEqual([1, 2, 3]);
+    expect(tail(undone, 1)).toEqual([
+      { type: 'remove', sheet: INITIAL_SHEET_ID, ids: ['b'] },
     ]);
   });
 
-  it('PC から届いた変更は反映するが、送り返さず履歴にも入れない', () => {
+  it('ack が来ると、その番号までが pending から除かれる', () => {
+    const drawn = run([add('a'), add('b'), add('c')]);
+
+    const acked = strokeHistoryReducer(drawn, { type: 'ack', seq: 2 });
+    expect(acked.pending).toEqual([
+      {
+        seq: 3,
+        op: {
+          type: 'insert',
+          sheet: INITIAL_SHEET_ID,
+          stroke: stroke('c'),
+          index: 2,
+        },
+      },
+    ]);
+    // Numbers are not reused
+    expect(acked.nextSeq).toBe(4);
+
+    // An ack above every number removes them all
+    const all = strokeHistoryReducer(drawn, { type: 'ack', seq: 99 });
+    expect(all.pending).toEqual([]);
+
+    // Nothing changes when there is nothing to remove
+    expect(strokeHistoryReducer(drawn, { type: 'ack', seq: 0 })).toBe(drawn);
+  });
+
+  it('PC から届いた変更は反映するが、pending と履歴には入れない', () => {
     const ai: Stroke = { ...stroke('ai-1'), author: 'ai' };
     const state = run([
       add('a'),
@@ -304,50 +344,31 @@ describe('PC に送る変更(outgoing)', () => {
       },
     ]);
     expect(ids(state)).toEqual(['a', 'ai-1']);
-    expect(state.outgoing).toEqual([]);
-    expect(currentSheet(state).undoStack).toHaveLength(1);
-  });
-
-  it('接続時は PC の全体に合わせ、このページだけが持つ筆跡は残して送る', () => {
-    const local = run([add('a'), add('b')]);
-    const merged = strokeHistoryReducer(local, {
-      type: 'snapshot',
-      sheets: [
-        {
-          id: INITIAL_SHEET_ID,
-          strokes: [stroke('b'), stroke('pc')],
-          image: null,
-        },
-      ],
-      current: INITIAL_SHEET_ID,
-    });
-    expect(ids(merged)).toEqual(['b', 'pc', 'a']);
-    expect(merged.outgoing).toEqual([
+    expect(ops(state)).toEqual([
       {
         type: 'insert',
         sheet: INITIAL_SHEET_ID,
         stroke: stroke('a'),
-        index: 2,
+        index: 0,
       },
     ]);
+    expect(currentSheet(state).undoStack).toHaveLength(1);
   });
 });
 
 describe('remote(紙ごと)', () => {
   it('別の紙への筆跡の変更は今の紙に入らず、無い紙への変更は無視する', () => {
     const ai: Stroke = { ...stroke('ai-1'), author: 'ai' };
-    const state = run([
-      add('a'),
-      { type: 'newSheet', id: 's2' },
-      {
-        type: 'remote',
-        op: { type: 'insert', sheet: INITIAL_SHEET_ID, stroke: ai, index: 0 },
-      },
-    ]);
+    const before = run([add('a'), { type: 'newSheet', id: 's2' }]);
+    const state = strokeHistoryReducer(before, {
+      type: 'remote',
+      op: { type: 'insert', sheet: INITIAL_SHEET_ID, stroke: ai, index: 0 },
+    });
     expect(state.current).toBe('s2');
     expect(idsOf(state, INITIAL_SHEET_ID)).toEqual(['ai-1', 'a']);
     expect(idsOf(state, 's2')).toEqual([]);
-    expect(state.outgoing).toEqual([]);
+    // Received changes do not change pending
+    expect(state.pending).toBe(before.pending);
 
     const missing = strokeHistoryReducer(state, {
       type: 'remote',
@@ -357,92 +378,106 @@ describe('remote(紙ごと)', () => {
   });
 
   it('selectSheet で今の紙が変わる', () => {
-    const state = run([{ type: 'newSheet', id: 's2' }]);
-    const switched = strokeHistoryReducer(state, {
+    const before = run([{ type: 'newSheet', id: 's2' }]);
+    const switched = strokeHistoryReducer(before, {
       type: 'remote',
       op: { type: 'selectSheet', id: INITIAL_SHEET_ID },
     });
     expect(switched.current).toBe(INITIAL_SHEET_ID);
-    expect(switched.outgoing).toEqual([]);
+    expect(switched.pending).toBe(before.pending);
   });
 });
 
 describe('snapshot', () => {
-  it('PC の紙の並びと current に合わさり、自分だけの紙は中身があれば末尾に残して送り返す', () => {
+  it('ほかの端末で消した筆跡・紙は戻らず、送る操作も増えない', () => {
+    // The stroke and sheet made here reached the PC and were acked (then deleted while disconnected)
+    const local = run([
+      add('a'),
+      { type: 'newSheet', id: 's2' },
+      add('b'),
+      { type: 'ack', seq: 4 },
+    ]);
+    expect(local.pending).toEqual([]);
+
+    const merged = strokeHistoryReducer(local, {
+      type: 'snapshot',
+      sheets: [{ id: INITIAL_SHEET_ID, strokes: [stroke('pc')], image: null }],
+      current: INITIAL_SHEET_ID,
+    });
+    // s2 (b) was deleted elsewhere, and so was a. Neither comes back
+    expect(merged.sheets.map(({ id }) => id)).toEqual([INITIAL_SHEET_ID]);
+    expect(ids(merged)).toEqual(['pc']);
+    expect(merged.pending).toEqual([]);
+  });
+
+  it('ack の来ていない操作は、PC の中身の上に当て直されて pending に残る', () => {
+    // A stroke and sheet made while disconnected (none acked)
     const local = run([add('a'), { type: 'newSheet', id: 's2' }, add('b')]);
+    expect(seqs(local)).toEqual([1, 2, 3, 4]);
+
+    const merged = strokeHistoryReducer(local, {
+      type: 'snapshot',
+      sheets: [{ id: INITIAL_SHEET_ID, strokes: [stroke('pc')], image: null }],
+      current: INITIAL_SHEET_ID,
+    });
+    // The operations are reapplied, oldest first, on top of the PC's contents.
+    // insert goes in at position 0, where it was drawn (an empty sheet on this page)
+    expect(merged.sheets.map(({ id }) => id)).toEqual([INITIAL_SHEET_ID, 's2']);
+    expect(idsOf(merged, INITIAL_SHEET_ID)).toEqual(['a', 'pc']);
+    expect(idsOf(merged, 's2')).toEqual(['b']);
+    // Sheet operations (selectSheet) are reapplied too
+    expect(merged.current).toBe('s2');
+    // pending and nextSeq stay as they are (the sync side resends them)
+    expect(merged.pending).toBe(local.pending);
+    expect(merged.nextSeq).toBe(5);
+  });
+
+  it('当て直しが当てられない操作は無視される', () => {
+    // While disconnected, sheet s2 was made, then the page went back and drew on the original sheet.
+    // The PC has neither (another device deleted everything)
+    const local = run([
+      { type: 'newSheet', id: 's2' },
+      { type: 'selectSheet', id: INITIAL_SHEET_ID },
+      add('a'),
+    ]);
+
+    const merged = strokeHistoryReducer(local, {
+      type: 'snapshot',
+      sheets: [{ id: 'pc', strokes: [stroke('pc')], image: null }],
+      current: 'pc',
+    });
+    // addSheet s2 and selectSheet s2 are reapplied.
+    // selectSheet and insert for the missing sheet (sheet-1) are ignored
+    expect(merged.sheets.map(({ id }) => id)).toEqual(['pc', 's2']);
+    expect(idsOf(merged, 's2')).toEqual([]);
+    expect(idsOf(merged, 'pc')).toEqual(['pc']);
+    expect(merged.pending).toBe(local.pending);
+  });
+
+  it('同じ ID の紙の取り消し・やり直しの履歴は残る', () => {
+    // The undo (remove of a) has not reached the PC yet
+    const local = run([add('a'), add('b'), { type: 'undo' }]);
+    expect(ids(local)).toEqual(['a']);
+
     const merged = strokeHistoryReducer(local, {
       type: 'snapshot',
       sheets: [
-        { id: 'pc2', strokes: [stroke('pc')], image: null },
-        { id: 's2', strokes: [], image: null },
+        {
+          id: INITIAL_SHEET_ID,
+          strokes: [stroke('a'), stroke('b')],
+          image: null,
+        },
       ],
-      current: 'pc2',
+      current: INITIAL_SHEET_ID,
     });
-    expect(merged.sheets.map(({ id }) => id)).toEqual([
-      'pc2',
-      's2',
-      INITIAL_SHEET_ID,
+    // The remove of b is reapplied on top of the PC's contents, and this page's history is kept
+    expect(ids(merged)).toEqual(['a']);
+    expect(currentSheet(merged).undoStack.map(({ type }) => type)).toEqual([
+      'add',
     ]);
-    expect(merged.current).toBe('pc2');
-    // A sheet this page did not have takes the PC's contents as is
-    expect(idsOf(merged, 'pc2')).toEqual(['pc']);
-    // Strokes only this page has are kept and sent back. A non-empty sheet only this page has is appended and sent back
-    expect(merged.outgoing).toEqual([
-      { type: 'insert', sheet: 's2', stroke: stroke('b'), index: 0 },
-      { type: 'addSheet', id: INITIAL_SHEET_ID, index: 2 },
-      {
-        type: 'insert',
-        sheet: INITIAL_SHEET_ID,
-        stroke: stroke('a'),
-        index: 0,
-      },
+    expect(currentSheet(merged).redoStack.map(({ type }) => type)).toEqual([
+      'add',
     ]);
-  });
-
-  it('自分だけの空の紙は捨てる', () => {
-    const local = run([
-      { type: 'newSheet', id: 's2' },
-      { type: 'newSheet', id: 's3' },
-      add('b'),
-    ]);
-    const merged = strokeHistoryReducer(local, {
-      type: 'snapshot',
-      sheets: [{ id: 'pc', strokes: [], image: null }],
-      current: 'pc',
-    });
-    expect(merged.sheets.map(({ id }) => id)).toEqual(['pc', 's3']);
-    expect(merged.outgoing).toEqual([
-      { type: 'addSheet', id: 's3', index: 1 },
-      { type: 'insert', sheet: 's3', stroke: stroke('b'), index: 0 },
-    ]);
-  });
-});
-
-describe('古い bridge(v0.3.0 まで)', () => {
-  it('legacySnapshot は今の紙にだけ今の mergeSnapshot と同じ合わせ方をする', () => {
-    const local = run([add('a'), { type: 'newSheet', id: 's2' }, add('b')]);
-    const merged = strokeHistoryReducer(local, {
-      type: 'legacySnapshot',
-      strokes: [stroke('pc')],
-    });
-    // The current sheet (s2) follows the PC, and strokes only this page has are sent back. The other sheet stays
-    expect(idsOf(merged, 's2')).toEqual(['pc', 'b']);
-    expect(idsOf(merged, INITIAL_SHEET_ID)).toEqual(['a']);
-    expect(merged.outgoing).toEqual([
-      { type: 'insert', sheet: 's2', stroke: stroke('b'), index: 1 },
-    ]);
-  });
-
-  it('legacyRemote は sheet の無い変更を今の紙への変更として扱う', () => {
-    const ai: Stroke = { ...stroke('ai-1'), author: 'ai' };
-    const state = run([
-      add('a'),
-      { type: 'newSheet', id: 's2' },
-      { type: 'legacyRemote', op: { type: 'insert', stroke: ai, index: 0 } },
-    ]);
-    expect(idsOf(state, 's2')).toEqual(['ai-1']);
-    expect(idsOf(state, INITIAL_SHEET_ID)).toEqual(['a']);
-    expect(state.outgoing).toEqual([]);
   });
 });
 
@@ -455,12 +490,12 @@ describe('画像', () => {
   it('追加・移動・削除を取り消し・やり直しでき、PC には setImage / removeImage で送る(sheet 付き)', () => {
     const placed = run([put(image('a'))]);
     expect(currentSheet(placed).image).toEqual(image('a'));
-    expect(placed.outgoing).toEqual([
+    expect(tail(placed, 1)).toEqual([
       { type: 'setImage', sheet: INITIAL_SHEET_ID, image: image('a') },
     ]);
 
     const moved = strokeHistoryReducer(placed, put({ ...image('a'), x: 30 }));
-    expect(moved.outgoing).toEqual([
+    expect(tail(moved, 1)).toEqual([
       {
         type: 'setImage',
         sheet: INITIAL_SHEET_ID,
@@ -470,25 +505,25 @@ describe('画像', () => {
 
     const undone = strokeHistoryReducer(moved, { type: 'undo' });
     expect(currentSheet(undone).image).toEqual(image('a'));
-    expect(undone.outgoing).toEqual([
+    expect(tail(undone, 1)).toEqual([
       { type: 'setImage', sheet: INITIAL_SHEET_ID, image: image('a') },
     ]);
 
     const removed = strokeHistoryReducer(undone, put(null));
     expect(currentSheet(removed).image).toBeNull();
-    expect(removed.outgoing).toEqual([
+    expect(tail(removed, 1)).toEqual([
       { type: 'removeImage', sheet: INITIAL_SHEET_ID },
     ]);
 
     const restored = strokeHistoryReducer(removed, { type: 'undo' });
     expect(currentSheet(restored).image).toEqual(image('a'));
-    expect(restored.outgoing).toEqual([
+    expect(tail(restored, 1)).toEqual([
       { type: 'setImage', sheet: INITIAL_SHEET_ID, image: image('a') },
     ]);
 
     const redone = strokeHistoryReducer(restored, { type: 'redo' });
     expect(currentSheet(redone).image).toBeNull();
-    expect(redone.outgoing).toEqual([
+    expect(tail(redone, 1)).toEqual([
       { type: 'removeImage', sheet: INITIAL_SHEET_ID },
     ]);
   });
@@ -508,7 +543,7 @@ describe('画像', () => {
     // Wipe the current sheet (s2): strokes, image, and history are cleared
     const cleared = strokeHistoryReducer(state, { type: 'clear' });
     expect(currentSheet(cleared).image).toBeNull();
-    expect(cleared.outgoing).toEqual([
+    expect(tail(cleared, 2)).toEqual([
       { type: 'remove', sheet: 's2', ids: ['b'] },
       { type: 'removeImage', sheet: 's2' },
     ]);
@@ -518,7 +553,7 @@ describe('画像', () => {
     expect(strokeHistoryReducer(cleared, { type: 'clear' })).toBe(cleared);
   });
 
-  it('PC から届いた画像の変更は反映するが、履歴にも出さない', () => {
+  it('PC から届いた画像の変更は反映するが、pending と履歴には入れない', () => {
     const state = run([
       {
         type: 'remote',
@@ -527,7 +562,7 @@ describe('画像', () => {
     ]);
     expect(currentSheet(state).image).toEqual(image('r'));
     expect(currentSheet(state).undoStack).toHaveLength(0);
-    expect(state.outgoing).toEqual([]);
+    expect(state.pending).toEqual([]);
 
     const removed = strokeHistoryReducer(state, {
       type: 'remote',
@@ -591,36 +626,36 @@ describe('画像', () => {
     expect(currentSheet(none).undoStack).toHaveLength(1);
   });
 
-  it('接続時は PC の画像を正とし、PC が持たないで自分が持つものは送り返す', () => {
+  it('繋ぎ直しは、ack が来ていない画像は当て直し、ack が来ているときは PC の画像を正とする', () => {
+    // No ack yet: even if the PC is empty, this page's image is reapplied (and resent)
     const local = run([put(image('mine'))]);
-
-    // If the PC is empty (e.g. after a bridge restart), send its own image back
     const empty = strokeHistoryReducer(local, {
       type: 'snapshot',
       sheets: [{ id: INITIAL_SHEET_ID, strokes: [], image: null }],
       current: INITIAL_SHEET_ID,
     });
     expect(currentSheet(empty).image).toEqual(image('mine'));
-    expect(empty.outgoing).toEqual([
+    expect(ops(empty)).toEqual([
       { type: 'setImage', sheet: INITIAL_SHEET_ID, image: image('mine') },
     ]);
 
-    // If the PC also has one, adopt the PC's and do not send it back
-    const both = strokeHistoryReducer(local, {
+    // Acked, and the PC has another image: the PC's image is used and pending does not grow
+    const acked = run([put(image('mine')), { type: 'ack', seq: 1 }]);
+    const both = strokeHistoryReducer(acked, {
       type: 'snapshot',
       sheets: [{ id: INITIAL_SHEET_ID, strokes: [], image: image('pc') }],
       current: INITIAL_SHEET_ID,
     });
     expect(currentSheet(both).image).toEqual(image('pc'));
-    expect(both.outgoing).toEqual([]);
+    expect(both.pending).toEqual([]);
   });
 
-  it('スナップショットで PC の画像を採用すると、画像の操作は履歴から消える(筆跡は残る)', () => {
-    const local = run([add('a'), put(image('mine')), { type: 'undo' }]);
+  it('繋ぎ直しで画像が変わると、画像の操作は履歴から消える(筆跡は残る)', () => {
+    const local = run([add('a'), put(image('mine')), { type: 'ack', seq: 2 }]);
     expect(currentSheet(local).undoStack.map(({ type }) => type)).toEqual([
       'add',
+      'image',
     ]);
-    expect(currentSheet(local).redoStack).toHaveLength(1);
 
     const merged = strokeHistoryReducer(local, {
       type: 'snapshot',
@@ -636,10 +671,10 @@ describe('画像', () => {
     expect(currentSheet(merged).redoStack).toEqual([]);
   });
 
-  it('スナップショットで画像が変わらなければ履歴は残る(PC が持たず自分のを残すときも)', () => {
+  it('繋ぎ直しで画像が変わらなければ履歴は残る', () => {
     const local = run([add('a'), put(image('mine'))]);
 
-    // The PC is empty and its own image is sent back = the image does not change
+    // The PC is empty and the image without an ack is reapplied, so the image does not change
     const empty = strokeHistoryReducer(local, {
       type: 'snapshot',
       sheets: [{ id: INITIAL_SHEET_ID, strokes: [stroke('a')], image: null }],

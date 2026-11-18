@@ -2,7 +2,7 @@
 //! Connection approval is handled by ui.rs (dialog), and connection state by link_status.rs.
 
 use std::net::IpAddr;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 use url::Url;
 
@@ -24,8 +24,12 @@ struct State {
     token: String,
 }
 
+type Listener = Box<dyn Fn() + Send + Sync>;
+
 pub struct Pairing {
     state: Mutex<State>,
+    /// Called when the QR contents (address or token) change (redraws an open QR window)
+    listener: OnceLock<Listener>,
 }
 
 impl Pairing {
@@ -35,6 +39,7 @@ impl Pairing {
                 endpoint: None,
                 token: new_token(),
             }),
+            listener: OnceLock::new(),
         }
     }
 
@@ -47,6 +52,31 @@ impl Pairing {
         let mut state = self.state();
         state.endpoint = Some(endpoint);
         state.token = new_token();
+        drop(state);
+        self.notify_changed();
+    }
+
+    /// Regenerates only the token (called after a connection is approved).
+    /// So the old token (which may remain in the browser history) can no longer be used
+    pub fn renew_token(&self) {
+        let mut state = self.state();
+        state.token = new_token();
+        drop(state);
+        self.notify_changed();
+    }
+
+    /// Calls the registered function, after releasing the state lock
+    fn notify_changed(&self) {
+        if let Some(listener) = self.listener.get() {
+            listener();
+        }
+    }
+
+    /// Registers the function called when the QR contents (address or token) change (once).
+    /// Only registered on OSes with a tray (tray.rs)
+    #[cfg(any(test, target_os = "macos", target_os = "windows"))]
+    pub fn set_listener(&self, listener: impl Fn() + Send + Sync + 'static) {
+        let _ = self.listener.set(Box::new(listener));
     }
 
     pub fn token_matches(&self, token: &str) -> bool {
@@ -78,6 +108,7 @@ fn new_token() -> String {
 mod tests {
     use super::*;
     use std::net::Ipv4Addr;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn urls_carry_connection_info_in_fragment() {
@@ -109,5 +140,45 @@ mod tests {
         let token = url.fragment().unwrap().rsplit_once("token=").unwrap().1;
         pairing.set_endpoint(endpoint);
         assert!(!pairing.token_matches(token));
+    }
+
+    #[test]
+    fn renew_token_invalidates_old_token() {
+        let pairing = Pairing::new();
+        pairing.set_endpoint(Endpoint {
+            ip: Ipv4Addr::LOCALHOST.into(),
+            port: 1,
+            certificate_hash: [0; 32],
+        });
+        let url = pairing.canvas_url().unwrap();
+        let token = url.fragment().unwrap().rsplit_once("token=").unwrap().1;
+        pairing.renew_token();
+        assert!(!pairing.token_matches(token));
+    }
+
+    #[test]
+    fn notifies_when_the_qr_content_changes() {
+        let pairing = Pairing::new();
+        let notified = std::sync::Arc::new(AtomicUsize::new(0));
+        let counter = notified.clone();
+        pairing.set_listener(move || {
+            counter.fetch_add(1, Ordering::Relaxed);
+        });
+        pairing.set_endpoint(Endpoint {
+            ip: Ipv4Addr::LOCALHOST.into(),
+            port: 1,
+            certificate_hash: [0; 32],
+        });
+        assert_eq!(
+            notified.load(Ordering::Relaxed),
+            1,
+            "set_endpoint で呼ばれる"
+        );
+        pairing.renew_token();
+        assert_eq!(
+            notified.load(Ordering::Relaxed),
+            2,
+            "renew_token でも呼ばれる"
+        );
     }
 }

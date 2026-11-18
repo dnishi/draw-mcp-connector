@@ -90,22 +90,16 @@ function strokeMesh(stroke: Stroke): Float32Array {
   return mesh;
 }
 
-/** The stroke being drawn */
-export interface ActiveStroke {
-  points: readonly StrokePoint[];
-  color: string;
-}
+/** How to apply the vertices of committed strokes to the GPU buffer */
+export type CommittedVertices =
+  | { kind: 'unchanged' }
+  /** Strokes were added after the previous ones. Write data at offset (in floats) */
+  | { kind: 'append'; offset: number; data: Float32Array }
+  /** Any other change (undo, eraser, sheet switch, changes from the PC, etc.). Rewrite everything */
+  | { kind: 'rebuild'; data: Float32Array };
 
-/** Collects the vertices of every stroke drawn on screen into one array */
-export function buildSceneVertices(
-  strokes: Iterable<Stroke>,
-  active?: ActiveStroke,
-): Float32Array {
-  const meshes = [...strokes].map(strokeMesh);
-  if (active && active.points.length > 0) {
-    meshes.push(tessellateStroke(active.points, active.color));
-  }
-
+/** Concatenates vertex arrays */
+function concatMeshes(meshes: readonly Float32Array[]): Float32Array {
   const vertices = new Float32Array(
     meshes.reduce((sum, mesh) => sum + mesh.length, 0),
   );
@@ -115,4 +109,42 @@ export function buildSceneVertices(
     offset += mesh.length;
   }
   return vertices;
+}
+
+/** Remembers the previous list of strokes and builds CommittedVertices from the difference with the next one */
+export class CommittedStrokes {
+  /** The previous list. null before the first call (the first call is a rebuild) */
+  #previous: readonly Stroke[] | null = null;
+  /** Number of floats of vertices in the previous list */
+  #length = 0;
+
+  update(strokes: readonly Stroke[]): CommittedVertices {
+    const previous = this.#previous;
+    this.#previous = strokes;
+    if (previous === strokes) {
+      return { kind: 'unchanged' };
+    }
+    // append if the new list starts with the previous one (same order, same objects) and only grew at the end
+    const appended =
+      previous !== null &&
+      strokes.length >= previous.length &&
+      previous.every((stroke, i) => strokes[i] === stroke);
+    if (!appended) {
+      const data = concatMeshes(strokes.map(strokeMesh));
+      this.#length = data.length;
+      return { kind: 'rebuild', data };
+    }
+    const data = concatMeshes(strokes.slice(previous.length).map(strokeMesh));
+    if (data.length === 0) {
+      return { kind: 'unchanged' };
+    }
+    const offset = this.#length;
+    this.#length += data.length;
+    return { kind: 'append', offset, data };
+  }
+
+  /** Current number of floats of vertices */
+  get length(): number {
+    return this.#length;
+  }
 }

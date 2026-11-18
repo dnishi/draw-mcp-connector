@@ -1,0 +1,33 @@
+# Type checks, tests, lint and format checks for the canvas page (src/ui). Does not build the app
+name: ui
+
+on:
+  push:
+    branches: ['**']
+    paths: ['src/ui/**', '.github/workflows/ui.yml']
+  pull_request:
+    paths: ['src/ui/**', '.github/workflows/ui.yml']
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: src/ui
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # Same Node.js version as the development container (the npm cache key is made from package-lock.json)
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          cache: npm
+          cache-dependency-path: src/ui/package-lock.json
+      - run: npm ci
+      - run: npx tsc -b
+      - run: npm run test:run
+      - run: npm run lint
+      - run: npm run format:check

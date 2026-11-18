@@ -49,7 +49,7 @@ You can read and write on a handwritten canvas. The canvas is a page opened in a
 - To follow changes, remember the revision of read_canvas and pass it to read_canvas_changes. If ops is empty, there are no changes and no image
 - To wait until the user finishes writing on the canvas, call wait_for_canvas (the user presses Send to AI on the canvas to signal. Send to AI can be pressed only while the AI is waiting with wait_for_canvas). If sent is false, only about 50 seconds have passed, so call it again right away. If sent is true, read the returned changes and image and start working on the instructions. Use the returned revision as the next since_revision
 - The AI can remove or modify only the strokes written by the AI (author is ai)
-- If the canvas is not connected (if canvases is empty), connect it with connect_canvas";
+- If the canvas is not connected (if canvases is empty), connect it with connect_canvas. If it returns before the canvas connects, call it again to keep waiting";
 
 // The /// doc comments are sent to the AI as tool parameter descriptions, so they are written in English
 #[derive(Deserialize, JsonSchema)]
@@ -194,6 +194,44 @@ fn checked_points(points: Vec<StrokePoint>) -> Result<Vec<StrokePoint>, ErrorDat
         .collect())
 }
 
+/// Returning every change to the AI uses too many tokens, so more changes than this are returned as the whole current sheet
+const MAX_AI_CHANGES: usize = 500;
+
+/// Drawing the image and encoding it as PNG takes time, so the work that builds view.rs results (drawing the image)
+/// runs on a separate thread and does not block tokio's worker threads
+async fn spawn_view(
+    work: impl FnOnce() -> Result<CallToolResult, ErrorData> + Send + 'static,
+) -> Result<CallToolResult, ErrorData> {
+    tokio::task::spawn_blocking(work).await.map_err(|error| {
+        ErrorData::internal_error(format!("failed to render the image: {error}"), None)
+    })?
+}
+
+/// Groups the AI's strokes by the sheet that holds them (in stroke order).
+/// owners is the result of one stroke_owners call with the same ids.
+/// Human strokes and unknown IDs go into the second return value (skipped)
+fn group_ai_owned_by_sheet(
+    ids: &[String],
+    owners: &[Option<(String, Author)>],
+) -> (Vec<(String, Vec<String>)>, Vec<String>) {
+    let mut grouped: Vec<(String, Vec<String>)> = Vec::new();
+    let mut skipped = Vec::new();
+    for (id, owner) in ids.iter().zip(owners) {
+        let Some((sheet, Author::Ai)) = owner else {
+            skipped.push(id.clone());
+            continue;
+        };
+        match grouped
+            .iter_mut()
+            .find(|(group_sheet, _)| group_sheet == sheet)
+        {
+            Some(group) => group.1.push(id.clone()),
+            None => grouped.push((sheet.clone(), vec![id.clone()])),
+        }
+    }
+    (grouped, skipped)
+}
+
 /// Returns the sheet with that number (1-based, in order) and its number. Omit for the current sheet.
 /// Out of range (0, or more than the number of sheets) is an error
 fn sheet_by_number(
@@ -227,65 +265,54 @@ impl CanvasServer {
     }
 
     fn revision(&self) -> u64 {
-        self.app.canvas.snapshot().revision
+        // Only the revision number is needed, so the snapshot (which copies everything) is not used
+        self.app.canvas.revision()
     }
 
-    /// Stacks the strokes on top as AI strokes and returns their IDs. Takes the ID of the sheet to draw on
+    /// Adds the strokes on top as AI strokes and returns their IDs. Takes the ID of the sheet to write to.
+    /// Strokes are written one by one, so if the sheet is deleted midway, the strokes already written remain
     fn insert_ai_strokes(
         &self,
         sheet: &str,
         strokes: Vec<(String, Vec<StrokePoint>)>,
-    ) -> Vec<String> {
-        strokes
-            .into_iter()
-            .map(|(color, points)| {
-                let id = format!("ai-{}", net::random_hex(8));
-                let stroke = Stroke {
-                    id: id.clone(),
-                    author: Author::Ai,
-                    color,
-                    points,
-                };
-                let index = usize::MAX; // stack on top
-                self.app.canvas.apply(
+    ) -> Result<Vec<String>, ErrorData> {
+        let mut ids = Vec::with_capacity(strokes.len());
+        for (color, points) in strokes {
+            let id = format!("ai-{}", net::random_hex(8));
+            let stroke = Stroke {
+                id: id.clone(),
+                author: Author::Ai,
+                color,
+                points,
+            };
+            let index = usize::MAX; // stack on top
+            if self
+                .app
+                .canvas
+                .apply(
                     Origin::Ai,
                     CanvasOp::Insert {
                         sheet: sheet.into(),
                         stroke,
                         index,
                     },
-                );
-                id
-            })
-            .collect()
-    }
-
-    /// Picks out only the strokes written by the AI
-    fn split_ai_owned(&self, ids: Vec<String>) -> (Vec<String>, Vec<String>) {
-        ids.into_iter().partition(|id| {
-            self.app
-                .canvas
-                .find_stroke(id)
-                .is_some_and(|(_, stroke)| stroke.author == Author::Ai)
-        })
-    }
-
-    /// Groups stroke IDs by the sheet they are on (dropping missing IDs, keeping the order of the strokes)
-    fn group_by_sheet(&self, ids: &[String]) -> Vec<(String, Vec<String>)> {
-        let mut grouped: Vec<(String, Vec<String>)> = Vec::new();
-        for id in ids {
-            let Some((sheet, _)) = self.app.canvas.find_stroke(id) else {
-                continue;
-            };
-            match grouped
-                .iter_mut()
-                .find(|(group_sheet, _)| *group_sheet == sheet)
+                )
+                .is_none()
             {
-                Some(group) => group.1.push(id.clone()),
-                None => grouped.push((sheet, vec![id.clone()])),
+                // The user deleted the sheet between choosing it and writing
+                return Err(ErrorData::invalid_params(
+                    "The sheet was deleted while writing. Read the canvas again.",
+                    None,
+                ));
             }
+            ids.push(id);
         }
-        grouped
+        Ok(ids)
+    }
+
+    /// For each given ID, looks up the ID of the sheet holding the stroke and its author in one call (points are not copied)
+    fn stroke_owners(&self, ids: &[String]) -> Vec<Option<(String, Author)>> {
+        self.app.canvas.stroke_owners(ids)
     }
 
     /// Data of the placed image (on that sheet). None before it arrives or after it was dropped
@@ -303,7 +330,13 @@ impl CanvasServer {
         &self,
         since_revision: u64,
     ) -> (ChangesSince, Snapshot, Option<std::sync::Arc<StoredImage>>) {
-        let changes = self.app.canvas.changes_since(since_revision);
+        let changes = match self.app.canvas.changes_since(since_revision) {
+            // Too many changes would use too many of the AI's tokens, so return the whole current sheet
+            ChangesSince::Ops { ops, .. } if ops.len() > MAX_AI_CHANGES => {
+                ChangesSince::Snapshot(self.app.canvas.snapshot())
+            }
+            other => other,
+        };
         let current = self.app.canvas.snapshot();
         // The image attached to a diff is of the current sheet
         let data = self.placed_image_data(current.current_sheet());
@@ -313,26 +346,30 @@ impl CanvasServer {
     #[tool(
         description = "Reads one sheet (omit sheet for the current sheet). Returns sheet (the number of that sheet), currentSheet (the number of the sheet the user is currently viewing), sheetCount (the number of sheets), the image (PNG; if the user placed an image on that sheet, it is composited under the strokes), revision, canvases (the sheet size and the visible range per connected page), image (the position of the image), placedImage (the image placed on that sheet), and strokes (the ID and bounds of each stroke). With include_strokes: false, omits strokes"
     )]
-    fn read_canvas(
+    async fn read_canvas(
         &self,
         Parameters(params): Parameters<ReadCanvasParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let include_strokes = params.include_strokes.unwrap_or(true);
         let snapshot = self.app.canvas.snapshot();
-        let (_, sheet) = sheet_by_number(&snapshot, params.sheet)?;
+        let (number, sheet) = sheet_by_number(&snapshot, params.sheet)?;
         let data = self.placed_image_data(sheet);
-        view::canvas_result(&snapshot, sheet, include_strokes, data.as_deref())
+        // Draws an image, so run it on a separate thread
+        let sheet = snapshot.sheets[number - 1].clone();
+        spawn_view(move || view::canvas_result(&snapshot, &sheet, include_strokes, data.as_deref()))
+            .await
     }
 
     #[tool(
-        description = "Reads the changes of all sheets after the given revision. Each change has sheet (the number of its sheet; a change of a deleted sheet has none). If kind is ops, the result is the changes that reach the current state when applied in order (a stroke has only its ID and bounds, and an image change is setImage / removeImage); if kind is snapshot, the revision is too old, so the result is the whole current sheet. Always returns canvases (the sheet size and the currently visible range per connected page), currentSheet (the number of the current sheet), and sheetCount (the number of sheets). If there are changes, also returns the image of the current sheet (if ops is empty, there are no changes and no image)"
+        description = "Reads the changes of all sheets after the given revision. Each change has sheet (the number of its sheet; a change of a deleted sheet has none). If kind is ops, the result is the changes that reach the current state when applied in order (a stroke has only its ID and bounds, and an image change is setImage / removeImage); if kind is snapshot, the revision is too old or there are too many changes, so the result is the whole current sheet. Always returns canvases (the sheet size and the currently visible range per connected page), currentSheet (the number of the current sheet), and sheetCount (the number of sheets). If there are changes, also returns the image of the current sheet (if ops is empty, there are no changes and no image)"
     )]
-    fn read_canvas_changes(
+    async fn read_canvas_changes(
         &self,
         Parameters(params): Parameters<ChangesParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let (changes, current, data) = self.changes_data(params.since_revision);
-        view::changes_result(&changes, &current, data.as_deref())
+        // Draws an image, so run it on a separate thread
+        spawn_view(move || view::changes_result(&changes, &current, data.as_deref())).await
     }
 
     #[tool(
@@ -344,16 +381,12 @@ impl CanvasServer {
     ) -> Result<CallToolResult, ErrorData> {
         // Waits for a press of the canvas's Send to AI (long polling).
         // Shorter than Codex's default MCP tool timeout (60 seconds), so it does not hit that limit
-        let Some(canvas) = self
-            .app
-            .ai_inbox
-            .wait(config::WAIT_FOR_CANVAS_TIMEOUT)
-            .await
-        else {
+        let Some(canvas) = self.app.ai_inbox.wait(config::MCP_TOOL_WAIT_TIMEOUT).await else {
             return view::not_sent_result();
         };
         let (changes, current, data) = self.changes_data(params.since_revision);
-        view::sent_result(canvas, &changes, &current, data.as_deref())
+        // Draws an image, so run it on a separate thread
+        spawn_view(move || view::sent_result(canvas, &changes, &current, data.as_deref())).await
     }
 
     #[tool(
@@ -422,7 +455,7 @@ impl CanvasServer {
         // Look up the sheet to draw on once, before calling insert
         let snapshot = self.app.canvas.snapshot();
         let (number, sheet) = sheet_by_number(&snapshot, params.sheet)?;
-        let ids = self.insert_ai_strokes(&sheet.id, strokes);
+        let ids = self.insert_ai_strokes(&sheet.id, strokes)?;
         json_result(&WriteResult {
             revision: self.revision(),
             sheet: Some(number),
@@ -465,7 +498,7 @@ impl CanvasServer {
         let ids = groups
             .into_iter()
             .map(|strokes| self.insert_ai_strokes(&sheet.id, strokes))
-            .collect();
+            .collect::<Result<Vec<_>, ErrorData>>()?;
         json_result(&DrawShapesResult {
             revision: self.revision(),
             sheet: number,
@@ -481,23 +514,32 @@ impl CanvasServer {
         &self,
         Parameters(params): Parameters<UpdateParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let (owned, skipped) = self.split_ai_owned(vec![params.id]);
-        if let Some((sheet, current)) = owned.first().and_then(|id| self.app.canvas.find_stroke(id))
-        {
-            let stroke = Stroke {
-                color: checked_color(params.color, &current.color)?,
-                points: checked_points(params.points)?,
-                ..current
-            };
-            self.app
-                .canvas
-                .apply(Origin::Ai, CanvasOp::Replace { sheet, stroke });
-        }
+        let found = self
+            .app
+            .canvas
+            .find_stroke(&params.id)
+            .filter(|(_, stroke)| stroke.author == Author::Ai);
+        let Some((sheet, current)) = found else {
+            return json_result(&WriteResult {
+                revision: self.revision(),
+                sheet: None,
+                ids: Vec::new(),
+                skipped: vec![params.id],
+            });
+        };
+        let stroke = Stroke {
+            color: checked_color(params.color, &current.color)?,
+            points: checked_points(params.points)?,
+            ..current
+        };
+        self.app
+            .canvas
+            .apply(Origin::Ai, CanvasOp::Replace { sheet, stroke });
         json_result(&WriteResult {
             revision: self.revision(),
             sheet: None,
-            ids: owned,
-            skipped,
+            ids: vec![params.id],
+            skipped: Vec::new(),
         })
     }
 
@@ -508,8 +550,11 @@ impl CanvasServer {
         &self,
         Parameters(params): Parameters<DeleteParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let (owned, skipped) = self.split_ai_owned(params.ids);
-        for (sheet, ids) in self.group_by_sheet(&owned) {
+        // Search all sheets only once. The returned ids are in per-sheet order
+        let owners = self.stroke_owners(&params.ids);
+        let (grouped, skipped) = group_ai_owned_by_sheet(&params.ids, &owners);
+        let owned = grouped.iter().flat_map(|(_, ids)| ids.clone()).collect();
+        for (sheet, ids) in grouped {
             self.app
                 .canvas
                 .apply(Origin::Ai, CanvasOp::Remove { sheet, ids });
@@ -523,7 +568,7 @@ impl CanvasServer {
     }
 
     #[tool(
-        description = "Connects the canvas. Shows a QR code in the window of the PC app, and waits until the user scans it with a camera, opens the canvas, and approves it in the dialog on the PC"
+        description = "Connects the canvas. Shows a QR code in the window of the PC app, and waits up to about 50 seconds until the user scans it with a camera, opens the canvas, and approves it in the dialog on the PC. If it returns before the canvas connects, call it again to keep waiting"
     )]
     async fn connect_canvas(&self) -> Result<CallToolResult, ErrorData> {
         let text = connect::connect_canvas(&self.app).await;
@@ -552,7 +597,13 @@ pub async fn run(app: Arc<App>) -> Result<(), BoxError> {
     let service = StreamableHttpService::new(
         move || Ok(CanvasServer::new(app.clone())),
         Arc::new(LocalSessionManager::default()),
-        StreamableHttpServerConfig::default().with_allowed_hosts(config::MCP_ALLOWED_HOSTS),
+        // Check Origin so other sites open in a browser cannot call this MCP server.
+        // Do not rely on the Content-Type check. With the check enabled and an empty list of allowed origins,
+        // every request with an Origin header (a request from a browser) gets 403.
+        // Requests without Origin (AI agents) pass as before
+        StreamableHttpServerConfig::default()
+            .with_allowed_hosts(config::MCP_ALLOWED_HOSTS)
+            .enforce_origin_validation(),
     );
     let router = axum::Router::new().nest_service(config::MCP_PATH, service);
     let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, config::MCP_PORT)).await?;
@@ -611,6 +662,134 @@ mod tests {
         let snapshot = two_sheets();
         assert!(sheet_by_number(&snapshot, Some(0)).is_err());
         assert!(sheet_by_number(&snapshot, Some(3)).is_err());
+    }
+
+    /// If the sheet to write to is gone, returns an error instead of IDs of strokes that were not written
+    #[test]
+    fn insert_ai_strokes_errors_when_the_sheet_is_gone() {
+        let server = CanvasServer::new(Arc::new(App::new()));
+        let err = server
+            .insert_ai_strokes(
+                "no-such-sheet",
+                vec![(
+                    color::BLACK.into(),
+                    vec![StrokePoint {
+                        x: 0.0,
+                        y: 0.0,
+                        pressure: 0.5,
+                    }],
+                )],
+            )
+            .unwrap_err();
+        assert_eq!(
+            err.message,
+            "The sheet was deleted while writing. Read the canvas again."
+        );
+    }
+
+    /// Above the limit, changes are returned as the whole sheet (snapshot); exactly at the limit, as changes (ops)
+    #[test]
+    fn too_many_changes_become_a_snapshot() {
+        let app = Arc::new(App::new());
+        let server = CanvasServer::new(app.clone());
+        for i in 0..=MAX_AI_CHANGES {
+            app.canvas.apply(
+                Origin::Ai,
+                CanvasOp::Insert {
+                    sheet: INITIAL_SHEET_ID.into(),
+                    stroke: Stroke {
+                        id: format!("s{i}"),
+                        author: Author::Ai,
+                        color: color::BLACK.into(),
+                        points: vec![StrokePoint {
+                            x: 0.0,
+                            y: 0.0,
+                            pressure: 0.5,
+                        }],
+                    },
+                    index: usize::MAX,
+                },
+            );
+        }
+        // 501 changes: too many, so the whole current sheet
+        let (changes, current, _) = server.changes_data(0);
+        match changes {
+            ChangesSince::Snapshot(snapshot) => assert_eq!(snapshot.revision, current.revision),
+            _ => panic!("501 件の変更は snapshot になるべき"),
+        }
+        // 500 changes: kept as changes
+        let (changes, _, _) = server.changes_data(1);
+        assert!(matches!(&changes, ChangesSince::Ops { ops, .. } if ops.len() == MAX_AI_CHANGES));
+    }
+
+    /// read_canvas draws an image and builds its result on a separate thread (spawn_blocking),
+    /// but the returned text and image are the same as before
+    #[tokio::test]
+    async fn read_canvas_builds_its_result_on_a_blocking_thread() {
+        let server = CanvasServer::new(Arc::new(App::new()));
+        let result = server
+            .read_canvas(Parameters(ReadCanvasParams {
+                sheet: None,
+                include_strokes: None,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(result.content.len(), 1, "何も描かれていなければ画像は無い");
+        let json: serde_json::Value =
+            serde_json::from_str(&result.content[0].as_text().unwrap().text).unwrap();
+        assert_eq!(json["sheet"], 1);
+        assert_eq!(json["currentSheet"], 1);
+        assert_eq!(json["sheetCount"], 1);
+        assert_eq!(json["image"], serde_json::Value::Null);
+        assert_eq!(json["strokes"], serde_json::json!([]));
+    }
+
+    /// Human strokes and unknown IDs are not deleted and are returned in skipped; AI strokes are deleted across sheets
+    #[test]
+    fn delete_ai_strokes_skips_human_strokes() {
+        let app = Arc::new(App::new());
+        let server = CanvasServer::new(app.clone());
+        let point = StrokePoint {
+            x: 0.0,
+            y: 0.0,
+            pressure: 0.5,
+        };
+        let ai = server
+            .insert_ai_strokes(
+                INITIAL_SHEET_ID,
+                vec![(color::BLACK.into(), vec![point.clone()])],
+            )
+            .unwrap();
+        app.canvas.apply(
+            Origin::Ai,
+            CanvasOp::Insert {
+                sheet: INITIAL_SHEET_ID.into(),
+                stroke: Stroke {
+                    id: "human".into(),
+                    author: Author::Human,
+                    color: color::BLACK.into(),
+                    points: vec![point],
+                },
+                index: 0,
+            },
+        );
+        let ids = vec![ai[0].clone(), "human".into(), "none".into()];
+        let owners = server.stroke_owners(&ids);
+        assert_eq!(
+            group_ai_owned_by_sheet(&ids, &owners),
+            (
+                vec![(INITIAL_SHEET_ID.to_string(), vec![ai[0].clone()])],
+                vec!["human".to_string(), "none".to_string()],
+            )
+        );
+        server
+            .delete_ai_strokes(Parameters(DeleteParams { ids }))
+            .unwrap();
+        let strokes = &app.canvas.snapshot().sheets[0].strokes;
+        assert_eq!(
+            strokes.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            ["human"]
+        );
     }
 
     /// INSTRUCTIONS sent to the AI are ASCII only
