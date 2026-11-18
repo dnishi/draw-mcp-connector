@@ -134,6 +134,9 @@ jobs:
           path: dist
           merge-multiple: true
           skip-decompress: true
-      - run: gh release create "$GITHUB_REF_NAME" ../../dist/* --title "$GITHUB_REF_NAME" --generate-notes
+      # The release notes come from the annotated tag's message (written with git tag -a vX.Y.Z -F notes.md).
+      # Changes reach this repository without pull requests, so --generate-notes would show only a compare link.
+      # actions/checkout keeps annotated tags as they are since v6.0.2
+      - run: gh release create "$GITHUB_REF_NAME" ../../dist/* --title "$GITHUB_REF_NAME" --notes-from-tag
         env:
           GH_TOKEN: ${{ github.token }}
