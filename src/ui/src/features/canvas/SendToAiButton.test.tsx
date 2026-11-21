@@ -13,7 +13,7 @@ describe('SendToAiButton', () => {
     expect(onSend).toHaveBeenCalledOnce();
   });
 
-  it('onSend が null なら押せず、ほかのボタンの押せないときより薄い', () => {
+  it('onSend が null なら押せず、押せないボタン共通の 25% の濃さになる', () => {
     render(<SendToAiButton onSend={null} />);
     const button = screen.getByRole('button', { name: 'Send to AI' });
 

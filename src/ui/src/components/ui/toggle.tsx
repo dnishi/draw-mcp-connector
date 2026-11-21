@@ -6,8 +6,10 @@ import { cn } from '@/lib/utils';
 
 // A pressed (selected) button is shown with an inset outline in addition to the background (bg-muted, same as hover).
 // The background alone is nearly white and cannot be told apart from hover
+// When disabled it is 25% opacity (fainter than shadcn's default 50% so it can be told apart from when it can be pressed).
+// Other disabled parts (sliders, menu items) are set to the same 25%
 const toggleVariants = cva(
-  "group/toggle inline-flex items-center justify-center gap-1 rounded-lg text-sm font-medium whitespace-nowrap transition-all outline-none hover:bg-muted hover:text-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-destructive/20 aria-pressed:bg-muted aria-pressed:ring-2 aria-pressed:ring-foreground/70 aria-pressed:ring-inset data-[state=on]:bg-muted dark:aria-invalid:ring-destructive/40 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
+  "group/toggle inline-flex items-center justify-center gap-1 rounded-lg text-sm font-medium whitespace-nowrap transition-all outline-none hover:bg-muted hover:text-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-25 aria-invalid:border-destructive aria-invalid:ring-destructive/20 aria-pressed:bg-muted aria-pressed:ring-2 aria-pressed:ring-foreground/70 aria-pressed:ring-inset data-[state=on]:bg-muted dark:aria-invalid:ring-destructive/40 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
   {
     variants: {
       variant: {

@@ -37,7 +37,7 @@ function ImageSettings({
     <div className="flex items-center gap-1">
       <Slider
         thumbLabel="Image Size"
-        className="w-28 px-2 data-disabled:opacity-50"
+        className="w-28 px-2 data-disabled:opacity-25"
         disabled={imageScale === null}
         min={IMAGE_SCALE_PERCENT.min}
         max={IMAGE_SCALE_PERCENT.max}
@@ -55,7 +55,7 @@ function ImageSettings({
       <span
         className={cn(
           'w-11 text-right text-sm text-muted-foreground tabular-nums',
-          imageScale === null && 'opacity-50',
+          imageScale === null && 'opacity-25',
         )}
       >
         {Math.round(shown)}%

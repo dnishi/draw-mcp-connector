@@ -171,7 +171,7 @@ function EraserSettings({
       <Separator orientation="vertical" className="mx-1 my-1.5" />
       <Slider
         thumbLabel="Eraser Size"
-        className="w-28 px-2 data-disabled:opacity-50"
+        className="w-28 px-2 data-disabled:opacity-25"
         disabled={sizeDisabled}
         min={ERASER_SIZE.min}
         max={ERASER_SIZE.max}
@@ -182,7 +182,7 @@ function EraserSettings({
       <span
         className={cn(
           'w-11 text-right text-sm text-muted-foreground tabular-nums',
-          sizeDisabled && 'opacity-50',
+          sizeDisabled && 'opacity-25',
         )}
       >
         {Math.round(eraserSize)}px
@@ -281,8 +281,9 @@ function ClearButton({
   disabled: boolean;
   onClear: () => void;
 }) {
+  const [open, setOpen] = useState(false);
   return (
-    <AlertDialog.Root>
+    <AlertDialog.Root open={open} onOpenChange={setOpen}>
       <AlertDialog.Trigger
         render={
           <Button
@@ -298,6 +299,7 @@ function ClearButton({
       <AlertDialogPopup
         title="Clear this sheet?"
         description="All strokes and the image on this sheet will be erased. You can't undo this action."
+        onBackdropClick={() => setOpen(false)}
       >
         <AlertDialog.Close render={<Button variant="outline" />}>
           Cancel

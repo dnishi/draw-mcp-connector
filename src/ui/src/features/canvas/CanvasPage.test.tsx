@@ -243,11 +243,11 @@ describe('CanvasPage', () => {
         expect(moveButton()).toBeDisabled();
       });
 
-      it('画像をクリックすると出し、もう一度クリックしても閉じず、画像の外のクリックで閉じる', async () => {
+      it('画像をクリックすると出し、もう一度クリックしても閉じず、画像の外のクリックで閉じて Pen に戻る', async () => {
         await placeImage();
         await userEvent.click(moveButton());
-        // Close the popover opened by the button, then check that clicking the image opens it
-        await clickCanvas(5, 5);
+        // Close the popover opened by the button by pressing "Move Image" again, then check that clicking the image opens it
+        await userEvent.click(moveButton());
         await waitFor(() => expect(popup()).not.toBeInTheDocument());
 
         // A 400×200 image is placed in the middle of the 800×600 sheet (200 to 600, 200 to 400)
@@ -261,6 +261,57 @@ describe('CanvasPage', () => {
 
         await clickCanvas(5, 5);
         await waitFor(() => expect(popup()).not.toBeInTheDocument());
+        expect(screen.getByRole('button', { name: 'Pen' })).toHaveAttribute(
+          'aria-pressed',
+          'true',
+        );
+        expect(moveButton()).toHaveAttribute('aria-pressed', 'false');
+      });
+
+      it('Move Image を選んだまま画像の外をクリックすると、Pen に戻り、吹き出しも閉じる', async () => {
+        await placeImage();
+        await userEvent.click(moveButton());
+        await screen.findByRole('dialog', { name: 'Image Settings' });
+
+        await clickCanvas(5, 5);
+
+        await waitFor(() => expect(popup()).not.toBeInTheDocument());
+        expect(screen.getByRole('button', { name: 'Pen' })).toHaveAttribute(
+          'aria-pressed',
+          'true',
+        );
+        expect(moveButton()).toHaveAttribute('aria-pressed', 'false');
+      });
+
+      it('Eraser → Move Image と選んだまま画像の外をクリックすると、Eraser に戻る', async () => {
+        await placeImage();
+        await userEvent.click(screen.getByRole('button', { name: 'Eraser' }));
+        await userEvent.click(moveButton());
+        await screen.findByRole('dialog', { name: 'Image Settings' });
+
+        await clickCanvas(5, 5);
+
+        await waitFor(() => expect(popup()).not.toBeInTheDocument());
+        expect(screen.getByRole('button', { name: 'Eraser' })).toHaveAttribute(
+          'aria-pressed',
+          'true',
+        );
+        expect(moveButton()).toHaveAttribute('aria-pressed', 'false');
+      });
+
+      it('画像の上をクリックしても、移動ツールのまま', async () => {
+        await placeImage();
+        await userEvent.click(moveButton());
+        await screen.findByRole('dialog', { name: 'Image Settings' });
+
+        // A 400×200 image is placed in the middle of the 800×600 sheet (200 to 600, 200 to 400)
+        await clickCanvas(400, 300);
+
+        expect(moveButton()).toHaveAttribute('aria-pressed', 'true');
+        expect(screen.getByRole('button', { name: 'Pen' })).toHaveAttribute(
+          'aria-pressed',
+          'false',
+        );
       });
     });
 

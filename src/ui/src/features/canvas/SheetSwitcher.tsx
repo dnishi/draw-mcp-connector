@@ -10,9 +10,6 @@ import type { SheetControls } from './types';
 const ITEM_CLASS =
   'cursor-default rounded-lg px-3 py-2 text-sm outline-none data-[highlighted]:bg-muted data-[disabled]:opacity-25';
 
-/** Opacity of disabled buttons. 25%, the same as Send to AI, so they are easy to tell from enabled ones */
-const DISABLED_CLASS = 'disabled:opacity-25';
-
 interface SheetSwitcherProps {
   /** Switching and deleting sheets (sheets from useCanvasDrawing) */
   sheets: SheetControls;
@@ -36,7 +33,6 @@ export function SheetSwitcher({ sheets }: SheetSwitcherProps) {
         variant="ghost"
         size="icon"
         aria-label="Previous Sheet"
-        className={DISABLED_CLASS}
         title="Previous Sheet"
         disabled={sheets.previous === null}
         onClick={() => sheets.previous?.()}
@@ -72,7 +68,6 @@ export function SheetSwitcher({ sheets }: SheetSwitcherProps) {
         variant="ghost"
         size="icon"
         aria-label="Next Sheet"
-        className={DISABLED_CLASS}
         title="Next Sheet"
         disabled={sheets.next === null}
         onClick={() => sheets.next?.()}
@@ -83,7 +78,6 @@ export function SheetSwitcher({ sheets }: SheetSwitcherProps) {
         variant="ghost"
         size="icon"
         aria-label="New Sheet"
-        className={DISABLED_CLASS}
         title="New Sheet"
         disabled={sheets.add === null}
         onClick={() => sheets.add?.()}

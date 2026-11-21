@@ -480,6 +480,30 @@ describe('Toolbar', () => {
       expect(onClear).not.toHaveBeenCalled();
     });
 
+    it('後ろの暗い部分をクリックすると、消さずに閉じる', async () => {
+      const { onClear } = renderToolbar();
+
+      await userEvent.click(clearButton());
+      await screen.findByRole('alertdialog');
+      // Find it by the role and data-open that Base UI puts on the backdrop (a query by role excludes presentation)
+      await userEvent.click(
+        document.querySelector('[role="presentation"][data-open]')!,
+      );
+
+      expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+      expect(onClear).not.toHaveBeenCalled();
+    });
+
+    it('ダイアログの中(ボタン以外)をクリックしても閉じない', async () => {
+      renderToolbar();
+
+      await userEvent.click(clearButton());
+      const dialog = await screen.findByRole('alertdialog');
+      await userEvent.click(within(dialog).getByText('Clear this sheet?'));
+
+      expect(dialog).toBeInTheDocument();
+    });
+
     it('線が無いときは押せない', () => {
       renderToolbar({ canClear: false });
       expect(clearButton()).toBeDisabled();
@@ -513,5 +537,20 @@ describe('Toolbar', () => {
 
     expect(screen.getByRole('button', { name: 'Undo' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Redo' })).toBeDisabled();
+  });
+
+  it('押せないボタンは Send to AI と同じ 25% の濃さ(Undo・Redo・Clear・Move Image)', () => {
+    renderToolbar({
+      history: createHistory({ canUndo: false, canRedo: false }),
+      canClear: false,
+      canMoveImage: false,
+    });
+
+    for (const name of ['Undo', 'Redo', 'Clear', 'Move Image']) {
+      const button = screen.getByRole('button', { name });
+      expect(button).toBeDisabled();
+      expect(button).toHaveClass('disabled:opacity-25');
+      expect(button).not.toHaveClass('disabled:opacity-50');
+    }
   });
 });

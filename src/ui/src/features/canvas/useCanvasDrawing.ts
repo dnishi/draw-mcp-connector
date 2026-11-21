@@ -53,7 +53,10 @@ const CLICK_SLOP = 4;
 /** Empty vertex array passed when no stroke is being drawn (tools other than the pen) */
 const EMPTY_VERTICES = new Float32Array(0);
 
-/** Reports image operations with the move tool (Move Image) (opens and closes the popover near the image) */
+/**
+ * Reports image operations with the move tool (Move Image) (opens and closes the popover near the image.
+ * onClickOutside, a press and release outside the image without moving, is used by the page (CanvasPage) to return to the previous tool)
+ */
 export interface ImageEvents {
   /** Pressed and released on the image without moving. at is the release point (page coordinates, clientX / clientY) */
   onClick(at: { x: number; y: number }): void;

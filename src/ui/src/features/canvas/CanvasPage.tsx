@@ -37,7 +37,7 @@ export function CanvasPage({ connectionInfo = null }: CanvasPageProps) {
   const fingerDrawing = useFingerDrawing();
   const [eraserMode, setEraserMode] = useState<EraserMode>('stroke');
   const [eraserSize, setEraserSize] = useState<number>(ERASER_SIZE.initial);
-  /** The tool used before Move Image was selected. Restored when the image is gone */
+  /** The tool used before Move Image was selected. Restored when the image is gone, or when clicking outside the image with the move tool still selected */
   const [lastDrawingTool, setLastDrawingTool] = useState<DrawingTool>('pen');
   /**
    * Where the image size and delete popover is anchored (null when closed).
@@ -102,7 +102,9 @@ export function CanvasPage({ connectionInfo = null }: CanvasPageProps) {
     fingerDrawing.onPenDetected,
     {
       onClick: (at) => setImageSettingsAt({ kind: 'point', ...at }),
-      onClickOutside: () => setImageSettingsAt(null),
+      // Clicking outside the image returns to the tool used before Move Image was selected (only called with the move tool).
+      // changeTool closes the popover
+      onClickOutside: () => changeTool(lastDrawingTool),
       // Close once it starts moving (not shown after a drag either; it is shown only on a click)
       onGestureStart: () => setImageSettingsAt(null),
     },

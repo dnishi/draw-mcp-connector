@@ -57,7 +57,7 @@ describe('SheetSwitcher', () => {
     expect(screen.getByRole('button', { name: 'New Sheet' })).toBeDisabled();
   });
 
-  it('押せないボタンは、Send to AI と同じくほかの押せないボタンより薄い(25%)', () => {
+  it('押せないボタンは、押せないボタン共通の 25% の濃さになる', () => {
     render(<SheetSwitcher sheets={createControls()} />);
 
     for (const name of ['Previous Sheet', 'Next Sheet', 'New Sheet']) {

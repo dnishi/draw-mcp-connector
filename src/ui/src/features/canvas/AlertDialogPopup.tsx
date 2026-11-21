@@ -8,6 +8,11 @@ interface AlertDialogPopupProps {
   description: string;
   /** Buttons placed at the bottom right (AlertDialog.Close, etc.) */
   children: ReactNode;
+  /**
+   * What happens when the dimmed background (the backdrop) is clicked.
+   * Base UI's AlertDialog does not close on a click outside, so pass it when you want to close it yourself
+   */
+  onBackdropClick?: () => void;
 }
 
 /** Contents of a confirmation or notice dialog. Shown centered on the screen with the background dimmed */
@@ -15,10 +20,14 @@ export function AlertDialogPopup({
   title,
   description,
   children,
+  onBackdropClick,
 }: AlertDialogPopupProps) {
   return (
     <AlertDialog.Portal>
-      <AlertDialog.Backdrop className={DIALOG_BACKDROP_CLASS} />
+      <AlertDialog.Backdrop
+        className={DIALOG_BACKDROP_CLASS}
+        onClick={onBackdropClick}
+      />
       <AlertDialog.Popup
         className={cn(DIALOG_POPUP_CLASS, 'w-[min(90vw,22rem)]')}
       >

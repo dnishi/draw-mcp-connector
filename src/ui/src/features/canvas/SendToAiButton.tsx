@@ -8,8 +8,7 @@ interface SendToAiButtonProps {
 
 /**
  * Tells the AI that you have finished writing (the bridge hands it to the MCP tool wait_for_canvas).
- * It can be pressed only while the AI is waiting; otherwise it is faded (disabled).
- * To tell it apart from when it can be pressed, it is fainter than other disabled buttons (half opacity)
+ * It can be pressed only while the AI is waiting; otherwise it is faded (disabled), at the same 25% opacity as a disabled Button
  */
 export function SendToAiButton({ onSend }: SendToAiButtonProps) {
   return (
@@ -20,7 +19,6 @@ export function SendToAiButton({ onSend }: SendToAiButtonProps) {
       title="Send to AI"
       disabled={onSend === null}
       onClick={onSend ?? undefined}
-      className="disabled:opacity-25"
     >
       <Send />
     </Button>
