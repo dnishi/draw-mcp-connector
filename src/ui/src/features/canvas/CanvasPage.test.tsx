@@ -16,7 +16,7 @@ import {
 } from './StrokeRenderer';
 
 // Renderer that pretends WebGPU is available for the export tests.
-// Without a renderer the menu's Export… can't be pressed, but jsdom has no navigator.gpu
+// Without a renderer the menu's Export can't be pressed, but jsdom has no navigator.gpu
 const { strokeRendererOverride } = vi.hoisted(() => ({
   strokeRendererOverride: {
     current: null as { renderer: StrokeRenderer; error: null } | null,
@@ -428,7 +428,7 @@ describe('CanvasPage', () => {
     });
   });
 
-  describe('書き出し(Export…)', () => {
+  describe('書き出し(Export)', () => {
     // Fake a renderer (pretend WebGPU is available). The drawing itself cannot be tested (it only draws)
     const fakeRenderer = { resize: vi.fn(), draw: vi.fn(), destroy: vi.fn() };
     beforeEach(() => {
@@ -441,12 +441,12 @@ describe('CanvasPage', () => {
       strokeRendererOverride.current = null;
     });
 
-    it('メニューの Export… でパネルが開き、Cancel で閉じる', async () => {
+    it('メニューの Export でパネルが開き、Cancel で閉じる', async () => {
       render(<CanvasPage />);
 
       await userEvent.click(screen.getByRole('button', { name: 'Menu' }));
       await screen.findByRole('menu');
-      await userEvent.click(screen.getByRole('menuitem', { name: 'Export…' }));
+      await userEvent.click(screen.getByRole('menuitem', { name: 'Export' }));
 
       expect(
         await screen.findByRole('dialog', { name: 'Export' }),
@@ -493,9 +493,7 @@ describe('CanvasPage', () => {
 
         await userEvent.click(screen.getByRole('button', { name: 'Menu' }));
         await screen.findByRole('menu');
-        await userEvent.click(
-          screen.getByRole('menuitem', { name: 'Export…' }),
-        );
+        await userEvent.click(screen.getByRole('menuitem', { name: 'Export' }));
         expect(
           await screen.findByRole('dialog', { name: 'Export' }),
         ).toBeInTheDocument();

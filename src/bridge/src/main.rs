@@ -23,7 +23,7 @@ mod export;
 // The export dialog (format, target, save path). Same mechanism as the approval dialog
 #[cfg(any(test, target_os = "macos", target_os = "windows"))]
 mod export_dialog;
-// The steps of the tray menu's "Export…" item (the mark of whether an export is in progress is held by tray.rs)
+// The steps of the tray menu's "Export" item (the mark of whether an export is in progress is held by tray.rs)
 #[cfg(any(test, target_os = "macos", target_os = "windows"))]
 mod export_flow;
 // The export area window (macOS / Windows). The calculations are in area_select.rs

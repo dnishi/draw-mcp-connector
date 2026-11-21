@@ -1,4 +1,4 @@
-//! The flow of the "Export…" item in the tray menu.
+//! The flow of the "PNG" and "PDF" items under "Export" in the tray menu.
 //! Dialogs block until there is an answer, so they are not shown on the main thread (the event loop);
 //! they are shown on another thread, and when an area is needed, one is handed to the event loop
 //! side through on_area (once the area is decided, finish is called)
@@ -16,7 +16,7 @@ use crate::export_dialog;
 use crate::protocol::PageSize;
 use crate::render::Rect;
 
-/// Whether an export is in progress (to ignore a second Export…). Held by tray.rs
+/// Whether an export is in progress (to ignore PNG or PDF while an export is in progress). Held by tray.rs
 #[derive(Clone, Default)]
 pub struct ExportState {
     in_progress: Arc<AtomicBool>,
@@ -59,12 +59,13 @@ pub struct AreaRequest {
     pub page: PageSize,
 }
 
-/// Starts the export. Does nothing if an export is already in progress.
-/// Shows the format and target dialogs on another thread, and when an area has to be chosen,
+/// Starts the export in format (the format chosen in the menu). Does nothing if an export is already in progress.
+/// For PDF, shows the target dialog on another thread, and when an area has to be chosen,
 /// calls on_area (the side that decides the area calls finish)
 pub fn start(
     app: Arc<App>,
     state: &ExportState,
+    format: Format,
     on_area: impl FnOnce(AreaRequest) + Send + 'static,
 ) {
     if !state.begin() {
@@ -76,9 +77,6 @@ pub fn start(
         let mut guard = Guard {
             state: &state,
             handoff: false,
-        };
-        let Some(format) = export_dialog::choose_format() else {
-            return; // Cancel
         };
         let target = match format {
             Format::Png => Target::CurrentSheet,
@@ -200,7 +198,9 @@ mod tests {
         let state = ExportState::default();
         state.begin();
         let app = Arc::new(App::new());
-        start(app, &state, |_| panic!("途中なら何も呼び出されない"));
+        start(app, &state, Format::Png, |_| {
+            panic!("途中なら何も呼び出されない")
+        });
         // If a thread had been spawned while in progress, the in-progress state would come back before this return
         std::thread::sleep(Duration::from_millis(100));
         assert!(!state.begin(), "まだ途中");

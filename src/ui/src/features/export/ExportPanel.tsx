@@ -65,7 +65,6 @@ export function ExportPanel({
   // All sheets are exported only for PDF All Sheets (PNG is the current sheet even if the Pages choice remains).
   // All sheets cannot choose an area (always the whole sheet)
   const allSheets = format === 'pdf' && target === 'all';
-  const showArea = !allSheets;
   const defaultBase = defaultBaseName(
     openedAt,
     allSheets ? null : currentSheetIndex + 1,
@@ -145,52 +144,56 @@ export function ExportPanel({
             <ToggleGroupItem value="pdf">PDF</ToggleGroupItem>
           </ToggleGroup>
         </div>
-        {format === 'pdf' && (
-          <div className="flex items-center gap-3">
-            <span className={LABEL_CLASS}>Pages</span>
-            <ToggleGroup
-              aria-label="Pages"
+        {/* PNG is only the current sheet, so it can't be pressed. The row is not removed: the panel is
+            anchored at the bottom, so adding or removing a row would move the Format row above up or down */}
+        <div className="flex items-center gap-3">
+          <span className={LABEL_CLASS}>Pages</span>
+          <ToggleGroup
+            aria-label="Pages"
+            size="sm"
+            disabled={format === 'png'}
+            value={[format === 'png' ? 'current' : target]}
+            onValueChange={(values) => {
+              const next = values[0];
+              if (next === 'current' || next === 'all') {
+                onTargetChange(next);
+              }
+            }}
+          >
+            <ToggleGroupItem value="current">Current Sheet</ToggleGroupItem>
+            <ToggleGroupItem value="all">All Sheets</ToggleGroupItem>
+          </ToggleGroup>
+        </div>
+        {/* All Sheets is always the whole sheet, so it can't be pressed. The row is not removed (for the same reason as the Pages row) */}
+        <div className="flex items-center gap-3">
+          <span className={LABEL_CLASS}>Area</span>
+          <div className="flex min-w-0 flex-1 items-center gap-2">
+            <p className="min-w-0 flex-1 truncate text-sm text-muted-foreground">
+              {/* All Sheets can't choose an area by dragging (it's always the whole sheet), so don't make it look like it can */}
+              {allSheets ? 'Whole sheets.' : 'Drag on the canvas.'}
+            </p>
+            <span className="shrink-0 text-sm">
+              {allSheets
+                ? `${Math.round(page.width)} × ${Math.round(page.height)} px`
+                : `${Math.round(area.width)} × ${Math.round(area.height)} px`}
+            </span>
+            <Button
+              variant="outline"
               size="sm"
-              value={[target]}
-              onValueChange={(values) => {
-                const next = values[0];
-                if (next === 'current' || next === 'all') {
-                  onTargetChange(next);
-                }
-              }}
+              disabled={allSheets}
+              onClick={() =>
+                onAreaChange({
+                  x: 0,
+                  y: 0,
+                  width: page.width,
+                  height: page.height,
+                })
+              }
             >
-              <ToggleGroupItem value="current">Current Sheet</ToggleGroupItem>
-              <ToggleGroupItem value="all">All Sheets</ToggleGroupItem>
-            </ToggleGroup>
+              Select All
+            </Button>
           </div>
-        )}
-        {showArea && (
-          <div className="flex items-center gap-3">
-            <span className={LABEL_CLASS}>Area</span>
-            <div className="flex min-w-0 flex-1 items-center gap-2">
-              <p className="min-w-0 flex-1 truncate text-sm text-muted-foreground">
-                Drag on the canvas to choose the area.
-              </p>
-              <span className="shrink-0 text-sm">
-                {Math.round(area.width)} × {Math.round(area.height)} px
-              </span>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() =>
-                  onAreaChange({
-                    x: 0,
-                    y: 0,
-                    width: page.width,
-                    height: page.height,
-                  })
-                }
-              >
-                Select All
-              </Button>
-            </div>
-          </div>
-        )}
+        </div>
         <div className="flex items-center gap-3">
           <span className={LABEL_CLASS}>File name</span>
           <input

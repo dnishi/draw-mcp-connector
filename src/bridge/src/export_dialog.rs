@@ -1,4 +1,4 @@
-//! Shows the OS dialogs for exporting (format, target, save path, message, time stamp).
+//! Shows the OS dialogs for exporting (target, save path, message, time stamp).
 //! Like the approval dialog (approval_dialog.rs), on macOS it uses osascript,
 //! on Windows PowerShell, and neither uses a new crate.
 //! All of them block until there is an answer, so they are not called from the main thread (the event loop)
@@ -12,11 +12,8 @@ use crate::export::{Format, Target};
 use crate::os_script;
 
 // The UI strings (in English)
-const FORMAT_PROMPT: &str = "Export as:";
 const TARGET_PROMPT: &str = "Export which sheets?";
 const SAVE_PROMPT: &str = "Export";
-const PNG_CHOICE: &str = "PNG";
-const PDF_CHOICE: &str = "PDF";
 const CURRENT_SHEET_CHOICE: &str = "Current Sheet";
 const ALL_SHEETS_CHOICE: &str = "All Sheets";
 
@@ -30,11 +27,6 @@ fn choice_apple_script(prompt: &str, first: &str, second: &str) -> String {
         title = os_script::apple_quote(config::APP_NAME),
         prompt = os_script::apple_quote(prompt),
     )
-}
-
-/// macOS: an AppleScript that chooses the format
-fn format_apple_script() -> String {
-    choice_apple_script(FORMAT_PROMPT, PNG_CHOICE, PDF_CHOICE)
 }
 
 /// macOS: an AppleScript that chooses the target of the PDF
@@ -108,11 +100,6 @@ fn choice_ps_script(prompt: &str, first: &str, second: &str) -> String {
     )
 }
 
-/// Windows: a PowerShell that chooses the format (prints the text of the pressed button)
-fn format_ps_script() -> String {
-    choice_ps_script(FORMAT_PROMPT, PNG_CHOICE, PDF_CHOICE)
-}
-
 /// Windows: a PowerShell that chooses the target of the PDF (prints the text of the pressed button)
 fn target_ps_script() -> String {
     choice_ps_script(TARGET_PROMPT, CURRENT_SHEET_CHOICE, ALL_SHEETS_CHOICE)
@@ -169,15 +156,6 @@ fn stamp_ps_script() -> &'static str {
     "[Console]::OutputEncoding = [Text.Encoding]::UTF8; Get-Date -Format yyyy-MM-dd-HHmm"
 }
 
-/// Chooses the format. Cancel is None
-pub fn choose_format() -> Option<Format> {
-    let stdout = os_script::run(os_script::command(
-        &format_apple_script(),
-        &format_ps_script(),
-    ))?;
-    choice_to_format(&stdout)
-}
-
 /// Chooses the target of the PDF. Cancel is None
 pub fn choose_target() -> Option<Target> {
     let stdout = os_script::run(os_script::command(
@@ -221,15 +199,6 @@ pub fn local_stamp() -> Option<String> {
 
 /// The output of a choice. Accepts only what exactly matches a choice after removing the
 /// whitespace and newlines around it (`false`, empty, or other text is None)
-fn choice_to_format(stdout: &str) -> Option<Format> {
-    match stdout.trim() {
-        PNG_CHOICE => Some(Format::Png),
-        PDF_CHOICE => Some(Format::Pdf),
-        _ => None,
-    }
-}
-
-/// The output of a choice (the same rule as choice_to_format above)
 fn choice_to_target(stdout: &str) -> Option<Target> {
     match stdout.trim() {
         CURRENT_SHEET_CHOICE => Some(Target::CurrentSheet),
@@ -264,30 +233,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_format_script_has_the_prompt_the_choices_and_the_default() {
-        let apple = format_apple_script();
-        assert!(apple.contains("with title \"Draw MCP Connector\""));
-        assert!(apple.contains("with prompt \"Export as:\""));
-        assert!(apple.contains("choose from list {\"PNG\", \"PDF\"}"));
-        assert!(apple.contains("default items {\"PNG\"}"));
-
-        let ps = format_ps_script();
-        assert!(ps.contains("$form.Text = 'Draw MCP Connector'"));
-        assert!(ps.contains("$label.Text = 'Export as:'"));
-        assert!(ps.contains("$first.Text = 'PNG'"));
-        assert!(ps.contains("$second.Text = 'PDF'"));
-        assert!(ps.contains("$cancel.Text = 'Cancel'"));
-        assert!(!ps.contains('"'));
-    }
-
-    #[test]
     fn the_target_script_defaults_to_the_current_sheet() {
         let apple = target_apple_script();
+        assert!(apple.contains("with title \"Draw MCP Connector\""));
         assert!(apple.contains("with prompt \"Export which sheets?\""));
         assert!(apple.contains("choose from list {\"Current Sheet\", \"All Sheets\"}"));
         assert!(apple.contains("default items {\"Current Sheet\"}"));
 
         let ps = target_ps_script();
+        assert!(ps.contains("$form.Text = 'Draw MCP Connector'"));
+        assert!(ps.contains("$cancel.Text = 'Cancel'"));
         assert!(ps.contains("$label.Text = 'Export which sheets?'"));
         assert!(ps.contains("$first.Text = 'Current Sheet'"));
         assert!(ps.contains("$second.Text = 'All Sheets'"));
@@ -330,13 +285,13 @@ mod tests {
 
     #[test]
     fn the_choice_output_is_the_trimmed_choice_or_none() {
-        assert_eq!(choice_to_format("PNG\n"), Some(Format::Png));
-        assert_eq!(choice_to_format("  PDF \r\n"), Some(Format::Pdf));
-        assert_eq!(choice_to_format("false"), None, "Cancel は標準出力が false");
-        assert_eq!(choice_to_format(""), None);
-        assert_eq!(choice_to_format("PNGG"), None);
         assert_eq!(choice_to_target("All Sheets\n"), Some(Target::AllSheets));
-        assert_eq!(choice_to_target("false"), None);
+        assert_eq!(
+            choice_to_target("  Current Sheet \r\n"),
+            Some(Target::CurrentSheet)
+        );
+        assert_eq!(choice_to_target("false"), None, "Cancel は標準出力が false");
+        assert_eq!(choice_to_target(""), None);
         assert_eq!(choice_to_target("Current"), None);
     }
 

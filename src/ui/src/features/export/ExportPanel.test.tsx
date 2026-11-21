@@ -95,18 +95,22 @@ describe('ExportPanel', () => {
 
   it('Format と Pages で出る欄が変わる', () => {
     render(<Panel />);
-    const areaText = 'Drag on the canvas to choose the area.';
+    const areaText = 'Drag on the canvas.';
 
-    // PNG: no Pages row, the area is shown
-    expect(screen.queryByLabelText('Pages')).toBeNull();
+    // PNG: the Pages row stays but can't be pressed (only the current sheet), the area is shown
+    expect(screen.getByRole('button', { name: 'All Sheets' })).toBeDisabled();
     expect(screen.getByText(areaText)).toBeInTheDocument();
-    // PDF: Pages is shown. While on Current Sheet, the area is shown too
+    // PDF: Pages can be pressed. While on Current Sheet, the area is shown too
     fireEvent.click(screen.getByRole('button', { name: 'PDF' }));
-    expect(screen.getByLabelText('Pages')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'All Sheets' })).toBeEnabled();
     expect(screen.getByText(areaText)).toBeInTheDocument();
-    // All Sheets: the area row disappears because no area can be chosen
+    // All Sheets: no area can be chosen, so the area row stays but can't be pressed (it shows the whole sheet size)
     fireEvent.click(screen.getByRole('button', { name: 'All Sheets' }));
+    expect(screen.getByRole('button', { name: 'Select All' })).toBeDisabled();
+    expect(screen.getByText('400 × 300 px')).toBeInTheDocument();
+    // Don't make it look like the area can be chosen by dragging
     expect(screen.queryByText(areaText)).toBeNull();
+    expect(screen.getByText('Whole sheets.')).toBeInTheDocument();
   });
 
   it('名前は欄を変えていない間だけ、Pages に合わせて既定の名前が変わる', () => {
@@ -273,6 +277,6 @@ describe('ExportPanel', () => {
     expect(screen.getByRole('textbox', { name: 'File name' })).toHaveValue(
       'draw-mcp-2026-11-19-1530-sheet-2',
     );
-    expect(screen.getByText('Select All')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Select All' })).toBeEnabled();
   });
 });

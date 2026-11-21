@@ -43,8 +43,8 @@ With the MCP tool `draw_shapes`, AI agents can draw polylines, rectangles, ellip
 
 The canvas can be exported to a PNG or PDF file. A PNG is the current sheet; a PDF is the current sheet or all sheets (each sheet is one page). For the current sheet, you can choose the area to export (it starts as the whole sheet).
 
-- Canvas page: "Export…" in the menu at the left end of the menu bar at the top. Choose the format, area, and file name in the panel, and save it with the browser's download (on an iPad, it goes into the "Files" app)
-- PC app: "Export…" from the Draw MCP Connector icon in the menu bar. Choose the format, then the area window, then the save dialog, in that order. You can't export if the canvas has never been connected (the sheet size is taken from the canvas page)
+- Canvas page: "Export" in the menu at the left end of the menu bar at the top. Choose the format, area, and file name in the panel, and save it with the browser's download (on an iPad, it goes into the "Files" app)
+- PC app: from the Draw MCP Connector icon in the menu bar, choose "PNG" or "PDF" that appears next to "Export", then the area window, then the save dialog, in that order. You can't export if the canvas has never been connected (the sheet size is taken from the canvas page)
 
 ## Saving the canvas
 

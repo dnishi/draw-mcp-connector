@@ -1,6 +1,6 @@
 //! Menu bar (macOS) / notification area (Windows) icon, and the QR code window.
-//! The app's only UI is the menu (connection status, "Show QR Code", "Open Canvas", "Export…", "About", "Quit";
-//! a connected status line has a "Disconnect" submenu), the QR code window,
+//! The app's only UI is the menu (connection status, "Show QR Code", "Open Canvas", "Export", "About", "Quit";
+//! a connected status line has a "Disconnect" submenu, and "Export" has a "PNG" / "PDF" submenu), the QR code window,
 //! the export area window (export_window.rs),
 //! and the connection approval dialog (approval_dialog.rs).
 //! On macOS the event loop and icon must run on the main thread (per the tray-icon documentation).
@@ -20,6 +20,7 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 use crate::app::App;
 use crate::area_select::{Outcome, SheetRenderJob};
 use crate::config;
+use crate::export::Format;
 use crate::export_flow;
 use crate::export_window::ExportWindow;
 use crate::icon::{self, Appearance, Badge};
@@ -310,11 +311,39 @@ fn about_item() -> AboutItem {
     )
 }
 
+/// The menu's "Export". The format is chosen in the submenu that opens to the side (shown the same way as "Disconnect" on a status line)
+struct ExportMenu {
+    row: Submenu,
+    png: MenuItem,
+    pdf: MenuItem,
+}
+
+impl ExportMenu {
+    fn new() -> Self {
+        let png = MenuItem::new("PNG", true, None);
+        let pdf = MenuItem::new("PDF", true, None);
+        let row = Submenu::with_items("Export", true, &[&png, &pdf])
+            .expect("Export のサブメニューを作れない");
+        Self { row, png, pdf }
+    }
+
+    /// If the pressed item is in this submenu, its format
+    fn format(&self, id: &MenuId) -> Option<Format> {
+        if *id == *self.png.id() {
+            Some(Format::Png)
+        } else if *id == *self.pdf.id() {
+            Some(Format::Pdf)
+        } else {
+            None
+        }
+    }
+}
+
 /// Menu items (excluding status lines)
 struct MenuItems {
     show_qr: MenuItem,
     open_canvas: MenuItem,
-    export: MenuItem,
+    export: ExportMenu,
     about: AboutItem,
     quit: MenuItem,
 }
@@ -330,7 +359,7 @@ fn create_indicator(
         &PredefinedMenuItem::separator(),
         &items.show_qr,
         &items.open_canvas,
-        &items.export,
+        &items.export.row,
         &items.about,
         &items.quit,
     ])
@@ -390,7 +419,7 @@ pub fn run(app: Arc<App>, start: impl FnOnce()) -> ! {
     let items = MenuItems {
         show_qr: MenuItem::new("Show QR Code", true, None),
         open_canvas: MenuItem::new("Open Canvas", true, None),
-        export: MenuItem::new("Export…", true, None),
+        export: ExportMenu::new(),
         about: about_item(),
         quit: MenuItem::new("Quit", true, None),
     };
@@ -446,14 +475,16 @@ pub fn run(app: Arc<App>, start: impl FnOnce()) -> ! {
             Event::UserEvent(UserEvent::Menu(event)) if event.id == *items.open_canvas.id() => {
                 open_canvas(&app);
             }
-            Event::UserEvent(UserEvent::Menu(event)) if event.id == *items.export.id() => {
+            Event::UserEvent(UserEvent::Menu(event))
+                if let Some(format) = items.export.format(&event.id) =>
+            {
                 // If an export is in progress (the area window is open), just bring it to the front
                 if let Some(window) = &export_window {
                     window.bring_to_front();
                 } else {
                     // The closure is created for each event, so clone the proxy each time
                     let proxy = proxy.clone();
-                    export_flow::start(app.clone(), &export_state, move |request| {
+                    export_flow::start(app.clone(), &export_state, format, move |request| {
                         let _ = proxy.send_event(UserEvent::ExportArea(request));
                     });
                 }
