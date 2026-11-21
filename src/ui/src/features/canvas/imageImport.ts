@@ -52,7 +52,7 @@ export async function encodeImage(
 }
 
 /**
- * Placement right after import: in the middle of the paper, at the original size or smaller (the smaller of the original size and the fit), enlarged until the longer side fits the paper
+ * Placement right after import: in the middle of the sheet, at the original size or smaller (the smaller of the original size and the fit), enlarged until the longer side fits the sheet
  */
 export function initialPlacement(
   natural: ImportedSize,
@@ -78,7 +78,7 @@ export function initialPlacement(
 const clamp = (value: number, min: number, max: number) =>
   Math.min(max, Math.max(min, value));
 
-/** Moves the image to a position where it does not stick out of the paper (when the image is larger, allows the visible part) */
+/** Moves the image to a position where it does not stick out of the sheet (when the image is larger, allows the visible part) */
 export function clampPlacement(
   placement: ImagePlacement,
   page: PageSize,
@@ -86,8 +86,8 @@ export function clampPlacement(
   if (page.width === 0 || page.height === 0) {
     return placement;
   }
-  const axis = (value: number, size: number, paper: number) =>
-    clamp(value, Math.min(0, paper - size), Math.max(0, paper - size));
+  const axis = (value: number, size: number, sheetSize: number) =>
+    clamp(value, Math.min(0, sheetSize - size), Math.max(0, sheetSize - size));
   return {
     ...placement,
     x: axis(placement.x, placement.width, page.width),

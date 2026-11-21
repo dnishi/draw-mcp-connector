@@ -26,9 +26,10 @@ import {
   type ErasedPieces,
   type RemoteAction,
 } from './strokeHistory';
+import type { SheetSource } from '../export/exportFile';
 import { type ImagePlacement, MAX_SHEETS } from '../sync/protocol';
 import type { EraserMode, History, SheetControls, ToolSettings } from './types';
-import type { StrokeRenderer } from './StrokeRenderer';
+import type { ImageUnderlay, StrokeRenderer } from './StrokeRenderer';
 import { useStrokeRenderer } from './useStrokeRenderer';
 import {
   INITIAL_VIEW,
@@ -144,6 +145,23 @@ function toStrokePoint(
   return { x, y, pressure: event.pressure };
 }
 
+/** Underlay for the export: the image placed on the sheet combined with its placement, if the bitmap is decoded */
+function imageUnderlay(
+  image: ImagePlacement,
+  images: ImageStore,
+): ImageUnderlay | undefined {
+  const bitmap = images.bitmap(image.id);
+  return bitmap
+    ? {
+        bitmap,
+        x: image.x,
+        y: image.y,
+        width: image.width,
+        height: image.height,
+      }
+    : undefined;
+}
+
 /** Fine-grained points from the previous event to this one. Uses only this event's point if getCoalescedEvents is missing or empty */
 function coalescedEvents(event: PointerEvent): PointerEvent[] {
   const events = event.getCoalescedEvents?.() ?? [];
@@ -192,7 +210,7 @@ export function useCanvasDrawing(
   const viewRef = useRef(INITIAL_VIEW);
   const [view, setView] = useState(INITIAL_VIEW);
   const pinchRef = useRef(new PinchTracker());
-  /** Size of the canvas (paper). Same as the size of the canvas element (what is visible at 100%) */
+  /** Size of the canvas (sheet). Same as the size of the canvas element (what is visible at 100%) */
   const [page, setPage] = useState({ width: 0, height: 0 });
   // Used by pinch handling (reads the latest size from functions recreated on every pointer event)
   const pageRef = useRef(page);
@@ -316,7 +334,7 @@ export function useCanvasDrawing(
     requestRender();
   }, [renderer, page, requestRender]);
 
-  /** Commits the view (when a pinch ends, when resetting, when the paper size changes) */
+  /** Commits the view (when a pinch ends, when resetting, when the sheet size changes) */
   const commitView = useCallback(
     (next: View) => {
       viewRef.current = next;
@@ -345,7 +363,7 @@ export function useCanvasDrawing(
     requestRender();
   }, [currentSheetId, commitView, requestRender]);
 
-  // When the screen size (= the paper size) changes, fit the visible area inside the new paper again
+  // When the screen size (= the sheet size) changes, fit the visible area inside the new sheet again
   useEffect(() => {
     pageRef.current = page;
     commitView(clampView(viewRef.current, page));
@@ -803,6 +821,19 @@ export function useCanvasDrawing(
 
   return {
     error,
+    /** Renderer. null if WebGPU is unavailable (not created) */
+    renderer,
+    /**
+     * Material for the export: in sheet order, each sheet's strokes and image.
+     * The image is the underlay (the bitmap combined with its placement) if the bitmap is decoded, otherwise undefined
+     */
+    exportSources: (): SheetSource[] =>
+      state.sheets.map((sheet) => ({
+        strokes: sheet.strokes,
+        image: sheet.image ? imageUnderlay(sheet.image, images) : undefined,
+      })),
+    /** index of the current sheet (from 0) */
+    currentSheetIndex: sheetIndex,
     history,
     /** The committed view (excluding movement during a pinch) */
     view,

@@ -64,7 +64,7 @@ pub struct ImagePlacement {
     pub height: f64,
 }
 
-/// Contents of one sheet. The paper size (PageSize) is each connection's screen size and is not kept per sheet
+/// Contents of one sheet. The sheet size (PageSize) is each connection's screen size and is not kept per sheet
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Sheet {
     /// ID unique across the whole canvas
@@ -132,11 +132,18 @@ pub struct Viewport {
     pub height: f64,
 }
 
-/// Size of the canvas (paper) in CSS pixels. The paper starts at (0, 0) and matches the canvas area on the page (what is visible at 100%)
+/// Size of the canvas (sheet) in CSS pixels. The sheet starts at (0, 0) and matches the canvas area on the page (what is visible at 100%)
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct PageSize {
     pub width: f64,
     pub height: f64,
+}
+
+impl PageSize {
+    /// Whether the size is usable for export and the like: the width and height are finite and greater than 0
+    pub fn is_usable(&self) -> bool {
+        self.width.is_finite() && self.height.is_finite() && self.width > 0.0 && self.height > 0.0
+    }
 }
 
 /// Canvas page → bridge. One JSON object per line
@@ -147,7 +154,7 @@ pub enum ClientMessage {
     Hello {
         token: String,
         viewport: Viewport,
-        /// Paper size. Canvas pages from before paper sizes existed do not send it
+        /// Sheet size. Canvas pages from before sheet sizes existed do not send it
         #[serde(default)]
         page: Option<PageSize>,
         /// Resume key (resumeKey) received on a previous connection. Not sent if there is none
@@ -157,7 +164,7 @@ pub enum ClientMessage {
         #[serde(default)]
         protocol: u32,
     },
-    /// The visible area or paper size changed (screen size, zoom, pan)
+    /// The visible area or sheet size changed (screen size, zoom, pan)
     Resize {
         viewport: Viewport,
         #[serde(default)]

@@ -21,7 +21,7 @@ const openMenu = async () => {
 };
 
 describe('SheetSwitcher', () => {
-  it('今の紙の番号と枚数を出し、前・次・新規のボタンがそれぞれ呼ばれる', async () => {
+  it('今のシートの番号と枚数を出し、前・次・新規のボタンがそれぞれ呼ばれる', async () => {
     const controls = createControls();
     render(<SheetSwitcher sheets={controls} />);
 
@@ -39,7 +39,7 @@ describe('SheetSwitcher', () => {
     expect(controls.add).toHaveBeenCalledOnce();
   });
 
-  it('前の紙・次の紙・新しい紙が作れない(null)ときは、それぞれのボタンが押せない', () => {
+  it('前のシート・次のシート・新しいシートが作れない(null)ときは、それぞれのボタンが押せない', () => {
     render(
       <SheetSwitcher
         sheets={createControls({
@@ -67,7 +67,7 @@ describe('SheetSwitcher', () => {
     }
   });
 
-  it('メニューの「Delete Sheet…」→「Delete」で今の紙を消し、「Cancel」では消さない', async () => {
+  it('メニューの「Delete Sheet…」→「Delete」で今のシートを消し、「Cancel」では消さない', async () => {
     const controls = createControls();
     render(<SheetSwitcher sheets={controls} />);
 
@@ -95,7 +95,7 @@ describe('SheetSwitcher', () => {
     expect(controls.remove).toHaveBeenCalledOnce();
   });
 
-  it('メニューの「Delete All Sheets…」→「Delete All」で全部の紙を消す', async () => {
+  it('メニューの「Delete All Sheets…」→「Delete All」で全部のシートを消す', async () => {
     const controls = createControls();
     render(<SheetSwitcher sheets={controls} />);
 
@@ -115,7 +115,7 @@ describe('SheetSwitcher', () => {
     expect(controls.removeAll).toHaveBeenCalledOnce();
   });
 
-  it('紙を消せない(null)ときは「Delete Sheet…」が押せない', async () => {
+  it('シートを消せない(null)ときは「Delete Sheet…」が押せない', async () => {
     render(<SheetSwitcher sheets={createControls({ remove: null })} />);
 
     await openMenu();

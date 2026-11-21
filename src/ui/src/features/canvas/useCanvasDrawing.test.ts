@@ -308,7 +308,7 @@ describe('useCanvasDrawing', () => {
     expect(images.has('b')).toBe(false);
   });
 
-  it('紙を切り替えると表示が等倍に戻る', () => {
+  it('シートを切り替えると表示が等倍に戻る', () => {
     const { result, event } = setup();
     // Zoom in with a two-finger pinch
     const touch = (type: string, pointerId: number, x: number) =>

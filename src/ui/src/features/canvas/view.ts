@@ -2,7 +2,7 @@ import type { PageSize, Viewport } from '../sync/protocol';
 import type { Point } from './stroke';
 
 /**
- * Range of the zoom factor (1 is 100%). The canvas (paper) is the same size as the view, so it never goes below 100%
+ * Range of the zoom factor (1 is 100%). The canvas (sheet) is the same size as the view, so it never goes below 100%
  */
 export const SCALE_RANGE = { min: 1, max: 8 } as const;
 
@@ -59,10 +59,10 @@ export function visibleRange(
 const clamp = (value: number, min: number, max: number) =>
   Math.min(max, Math.max(min, value));
 
-/** Clamps the zoom factor and keeps the visible area inside the paper (page, starting at (0, 0)) */
+/** Clamps the zoom factor and keeps the visible area inside the sheet (page, starting at (0, 0)) */
 export function clampView(view: View, page: PageSize): View {
   const scale = clamp(view.scale, SCALE_RANGE.min, SCALE_RANGE.max);
-  // The view is the same size as the paper, so the visible width is page.width / scale
+  // The view is the same size as the sheet, so the visible width is page.width / scale
   return {
     originX: clamp(view.originX, 0, page.width - page.width / scale),
     originY: clamp(view.originY, 0, page.height - page.height / scale),

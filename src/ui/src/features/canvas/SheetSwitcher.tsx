@@ -19,7 +19,7 @@ interface SheetSwitcherProps {
 }
 
 /**
- * Sheet switcher, overlaid at the top right of the canvas.
+ * Sheet switcher, placed at the center of the menu bar.
  * Previous, next, and new sheet are buttons; deleting is in the menu of the number button
  */
 export function SheetSwitcher({ sheets }: SheetSwitcherProps) {
@@ -31,7 +31,7 @@ export function SheetSwitcher({ sheets }: SheetSwitcherProps) {
   const [removeAllOpen, setRemoveAllOpen] = useState(false);
 
   return (
-    <div className="flex items-center gap-1 rounded-xl border bg-background p-1 shadow-sm">
+    <div className="flex items-center gap-1">
       <Button
         variant="ghost"
         size="icon"

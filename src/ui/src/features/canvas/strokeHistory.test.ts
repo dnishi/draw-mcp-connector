@@ -117,7 +117,7 @@ describe('strokeHistoryReducer', () => {
     expect(ids(redone)).toEqual(['a', 'b1', 'b2', 'c']);
   });
 
-  it('クリアすると、今の紙の筆跡と履歴が消え、PC にはまとめて消す変更を送る', () => {
+  it('クリアすると、今のシートの筆跡と履歴が消え、PC にはまとめて消す変更を送る', () => {
     const drawn = run([add('a'), add('b'), add('c'), { type: 'undo' }]);
 
     const cleared = strokeHistoryReducer(drawn, { type: 'clear' });
@@ -157,8 +157,8 @@ describe('strokeHistoryReducer', () => {
     );
   });
 
-  describe('紙ごとの履歴', () => {
-    it('紙 1 で書いて紙 2 に切り替えても undo しても紙 1 の筆跡は消えず、紙 1 に戻れば undo できる', () => {
+  describe('シートごとの履歴', () => {
+    it('シート 1 で書いてシート 2 に切り替えても undo してもシート 1 の筆跡は消えず、シート 1 に戻れば undo できる', () => {
       const state = run([add('a'), { type: 'newSheet', id: 's2' }, add('b')]);
 
       // Undo on sheet 2 affects only sheet 2; sheet 1's stroke stays
@@ -177,8 +177,8 @@ describe('strokeHistoryReducer', () => {
     });
   });
 
-  describe('紙の変更', () => {
-    it('newSheet は今の紙のすぐ後ろに空の紙を差し込んでその紙にする', () => {
+  describe('シートの変更', () => {
+    it('newSheet は今のシートのすぐ後ろに空のシートを差し込んでそのシートにする', () => {
       const state = run([add('a'), { type: 'newSheet', id: 's2' }]);
       expect(state.sheets.map(({ id }) => id)).toEqual([
         INITIAL_SHEET_ID,
@@ -206,7 +206,7 @@ describe('strokeHistoryReducer', () => {
       );
     });
 
-    it('selectSheet は今の紙を替えて PC に送る。既に今の紙・無い紙は何もしない', () => {
+    it('selectSheet は今のシートを替えて PC に送る。既に今のシート・無いシートは何もしない', () => {
       const state = run([{ type: 'newSheet', id: 's2' }]);
       const switched = strokeHistoryReducer(state, {
         type: 'selectSheet',
@@ -227,7 +227,7 @@ describe('strokeHistoryReducer', () => {
       ).toBe(switched);
     });
 
-    it('removeSheet は今の紙を中身ごと消し、消した位置の紙が今の紙になる', () => {
+    it('removeSheet は今のシートを中身ごと消し、消した位置のシートが今のシートになる', () => {
       const state = run([
         add('a'),
         { type: 'newSheet', id: 's2' },
@@ -250,7 +250,7 @@ describe('strokeHistoryReducer', () => {
       expect(strokeHistoryReducer(state, { type: 'removeSheet' })).toBe(state);
     });
 
-    it('resetSheets は白紙の INITIAL_SHEET_ID の紙 1 枚にして PC に送る', () => {
+    it('resetSheets は空の INITIAL_SHEET_ID のシート 1 枚にして PC に送る', () => {
       const state = run([
         add('a'),
         { type: 'newSheet', id: 's2' },
@@ -262,7 +262,7 @@ describe('strokeHistoryReducer', () => {
       expect(tail(state, 1)).toEqual([{ type: 'resetSheets' }]);
     });
 
-    it('resetSheets は既に白紙の INITIAL_SHEET_ID の紙 1 枚だけなら何もしない', () => {
+    it('resetSheets は既に空の INITIAL_SHEET_ID のシート 1 枚だけなら何もしない', () => {
       expect(
         strokeHistoryReducer(initialStrokeHistory, { type: 'resetSheets' }),
       ).toBe(initialStrokeHistory);
@@ -356,8 +356,8 @@ describe('pending(このページが起こした操作のうち、ack の来て�
   });
 });
 
-describe('remote(紙ごと)', () => {
-  it('別の紙への筆跡の変更は今の紙に入らず、無い紙への変更は無視する', () => {
+describe('remote(シートごと)', () => {
+  it('別のシートへの筆跡の変更は今のシートに入らず、無いシートへの変更は無視する', () => {
     const ai: Stroke = { ...stroke('ai-1'), author: 'ai' };
     const before = run([add('a'), { type: 'newSheet', id: 's2' }]);
     const state = strokeHistoryReducer(before, {
@@ -377,7 +377,7 @@ describe('remote(紙ごと)', () => {
     expect(missing).toBe(state);
   });
 
-  it('selectSheet で今の紙が変わる', () => {
+  it('selectSheet で今のシートが変わる', () => {
     const before = run([{ type: 'newSheet', id: 's2' }]);
     const switched = strokeHistoryReducer(before, {
       type: 'remote',
@@ -389,7 +389,7 @@ describe('remote(紙ごと)', () => {
 });
 
 describe('snapshot', () => {
-  it('ほかの端末で消した筆跡・紙は戻らず、送る操作も増えない', () => {
+  it('ほかの端末で消した筆跡・シートは戻らず、送る操作も増えない', () => {
     // The stroke and sheet made here reached the PC and were acked (then deleted while disconnected)
     const local = run([
       add('a'),
@@ -454,7 +454,7 @@ describe('snapshot', () => {
     expect(merged.pending).toBe(local.pending);
   });
 
-  it('同じ ID の紙の取り消し・やり直しの履歴は残る', () => {
+  it('同じ ID のシートの取り消し・やり直しの履歴は残る', () => {
     // The undo (remove of a) has not reached the PC yet
     const local = run([add('a'), add('b'), { type: 'undo' }]);
     expect(ids(local)).toEqual(['a']);
@@ -533,7 +533,7 @@ describe('画像', () => {
     expect(strokeHistoryReducer(before, put(image('a')))).toBe(before);
   });
 
-  it('クリアは今の紙の画像も消し、筆跡の削除とまとめて PC に送る。ほかの紙は消えない', () => {
+  it('クリアは今のシートの画像も消し、筆跡の削除とまとめて PC に送る。ほかのシートは消えない', () => {
     const state = run([
       add('a'),
       { type: 'newSheet', id: 's2' },

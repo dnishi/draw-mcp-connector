@@ -359,7 +359,7 @@ describe('useBridgeSync', () => {
     ]);
   });
 
-  it('置かれている画像のバイト列は、どの紙のものでも求める', async () => {
+  it('置かれている画像のバイト列は、どのシートのものでも求める', async () => {
     setup();
     await waitFor(() => expect(sent).toHaveLength(1));
 

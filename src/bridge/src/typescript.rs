@@ -232,16 +232,16 @@ export interface Name {{
     #[test]
     fn constant_is_number_or_quoted_string() {
         assert_eq!(
-            constant("MAX_SHEETS", "紙の枚数の上限", &serde_json::json!(50)),
-            "\n/** 紙の枚数の上限 */\nexport const MAX_SHEETS = 50;\n"
+            constant("MAX_SHEETS", "シートの枚数の上限", &serde_json::json!(50)),
+            "\n/** シートの枚数の上限 */\nexport const MAX_SHEETS = 50;\n"
         );
         assert_eq!(
             constant(
                 "INITIAL_SHEET_ID",
-                "最初の紙の ID",
+                "最初のシートの ID",
                 &serde_json::json!("sheet-1")
             ),
-            "\n/** 最初の紙の ID */\nexport const INITIAL_SHEET_ID = 'sheet-1';\n"
+            "\n/** 最初のシートの ID */\nexport const INITIAL_SHEET_ID = 'sheet-1';\n"
         );
     }
 }

@@ -98,6 +98,11 @@ export type CommittedVertices =
   /** Any other change (undo, eraser, sheet switch, changes from the PC, etc.). Rewrite everything */
   | { kind: 'rebuild'; data: Float32Array };
 
+/** Turns the list of strokes into triangle-list vertices (the export uses it) */
+export function strokesMesh(strokes: readonly Stroke[]): Float32Array {
+  return concatMeshes(strokes.map(strokeMesh));
+}
+
 /** Concatenates vertex arrays */
 function concatMeshes(meshes: readonly Float32Array[]): Float32Array {
   const vertices = new Float32Array(
@@ -130,7 +135,7 @@ export class CommittedStrokes {
       strokes.length >= previous.length &&
       previous.every((stroke, i) => strokes[i] === stroke);
     if (!appended) {
-      const data = concatMeshes(strokes.map(strokeMesh));
+      const data = strokesMesh(strokes);
       this.#length = data.length;
       return { kind: 'rebuild', data };
     }

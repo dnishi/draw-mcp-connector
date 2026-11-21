@@ -17,7 +17,7 @@ use crate::app::App;
 use crate::canvas::Canvas;
 use crate::config;
 use crate::lock::lock;
-use crate::protocol::{MAX_SHEETS, Sheet};
+use crate::protocol::{MAX_SHEETS, PageSize, Sheet};
 use crate::render::StoredImage;
 
 /// Version of the file format. Currently 1
@@ -30,6 +30,8 @@ pub struct Saved {
     pub sheets: Vec<Sheet>,
     /// Bytes of the placed images (image ID, bytes). Images whose files were missing are not included
     pub images: Vec<(String, Vec<u8>)>,
+    /// The sheet size that was saved
+    pub page: Option<PageSize>,
 }
 
 /// Type for reading and writing canvas.json (only inside store.rs; uses protocol.rs's Sheet as is)
@@ -39,6 +41,9 @@ struct FileFormat {
     revision: u64,
     current: String,
     sheets: Vec<Sheet>,
+    /// The sheet size. Absent in older files, so it is read as None; not written when None
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    page: Option<PageSize>,
 }
 
 /// Image IDs that can be file names: 1 to 64 ASCII letters, digits, `-`, or `_`.
@@ -99,7 +104,7 @@ impl Store {
         };
         if !rules_ok(&file) {
             warn!(
-                "canvas.json が決まりに合わない(format: {}, 紙: {} 枚)",
+                "canvas.json が決まりに合わない(format: {}, シート: {} 枚)",
                 file.format,
                 file.sheets.len()
             );
@@ -112,6 +117,7 @@ impl Store {
             current: file.current,
             sheets: file.sheets,
             images,
+            page: file.page.filter(PageSize::is_usable),
         })
     }
 
@@ -124,6 +130,7 @@ impl Store {
             revision: snapshot.revision,
             current: snapshot.current,
             sheets: snapshot.sheets,
+            page: canvas.page(),
         };
         // Write the images before canvas.json (so that canvas.json never points to an image not yet written)
         // Write the strokes even if the images cannot be written (when reading, the placement stays without the image file)
@@ -323,10 +330,12 @@ pub(crate) mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
+    use std::net::IpAddr;
+
     use crate::app::App;
-    use crate::canvas::{Canvas, Origin};
+    use crate::canvas::{Canvas, CanvasView, Origin};
     use crate::protocol::{
-        Author, CanvasOp, INITIAL_SHEET_ID, ImagePlacement, Stroke, StrokePoint,
+        Author, CanvasOp, INITIAL_SHEET_ID, ImagePlacement, PageSize, Stroke, StrokePoint, Viewport,
     };
 
     /// Number of temporary folders already made in this test process
@@ -421,6 +430,87 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn saving_then_loading_returns_the_page() {
+        let dir = temp_dir();
+        let store = Store::new(dir.clone());
+        let canvas = Canvas::new();
+        canvas.apply(
+            Origin::Ai,
+            CanvasOp::Insert {
+                sheet: INITIAL_SHEET_ID.into(),
+                stroke: stroke("s"),
+                index: 0,
+            },
+        );
+        canvas.set_view(CanvasView {
+            id: 1,
+            ip: IpAddr::from([192, 168, 0, 1]),
+            page: Some(PageSize {
+                width: 1200.0,
+                height: 800.0,
+            }),
+            viewport: Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: 1200.0,
+                height: 800.0,
+            },
+        });
+        store.save(&canvas);
+
+        let saved = store.load().expect("読めるはず");
+        assert_eq!(
+            saved.page,
+            Some(PageSize {
+                width: 1200.0,
+                height: 800.0
+            })
+        );
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn a_canvas_json_without_page_still_loads() {
+        let dir = temp_dir();
+        let sheet = r#"{"id":"sheet-1","strokes":[],"image":null}"#;
+        std::fs::write(
+            dir.join("canvas.json"),
+            format!("{{\"format\":1,\"revision\":0,\"current\":\"sheet-1\",\"sheets\":[{sheet}]}}"),
+        )
+        .unwrap();
+
+        let saved = Store::new(dir.clone())
+            .load()
+            .expect("古いファイルも読めるはず");
+        assert_eq!(saved.page, None);
+        assert_eq!(saved.sheets.len(), 1);
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn an_invalid_page_in_canvas_json_becomes_none() {
+        let dir = temp_dir();
+        let sheet = r#"{"id":"sheet-1","strokes":[],"image":null}"#;
+        std::fs::write(
+            dir.join("canvas.json"),
+            format!(
+                "{{\"format\":1,\"revision\":0,\"current\":\"sheet-1\",\"page\":{{\"width\":0,\"height\":800}},\"sheets\":[{sheet}]}}"
+            ),
+        )
+        .unwrap();
+
+        let saved = Store::new(dir.clone())
+            .load()
+            .expect("ファイル全体は壊れないはず");
+        assert_eq!(saved.page, None);
+        assert_eq!(saved.sheets.len(), 1);
+
+        cleanup(&dir);
+    }
+
+    #[test]
     fn deleting_a_sheet_deletes_its_image_file() {
         let dir = temp_dir();
         let store = Store::new(dir.clone());
@@ -432,7 +522,7 @@ pub(crate) mod tests {
         canvas.apply(Origin::Ai, CanvasOp::RemoveSheet { id: "b".into() });
         store.save(&canvas);
 
-        assert!(!image_path.exists(), "紙が消えたらその画像も消える");
+        assert!(!image_path.exists(), "シートが消えたらその画像も消える");
         assert!(dir.join("canvas.json").exists());
 
         cleanup(&dir);
@@ -503,7 +593,7 @@ pub(crate) mod tests {
                 ),
             ),
             (
-                "紙が 0 枚",
+                "シートが 0 枚",
                 "{\"format\":1,\"revision\":0,\"current\":\"sheet-1\",\"sheets\":[]}",
             ),
             (
@@ -513,7 +603,7 @@ pub(crate) mod tests {
                 ),
             ),
             (
-                "紙の ID が重なる",
+                "シートの ID が重なる",
                 &format!(
                     "{{\"format\":1,\"revision\":0,\"current\":\"sheet-1\",\"sheets\":[{sheet},{sheet}]}}"
                 ),

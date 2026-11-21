@@ -241,7 +241,7 @@ fn sheet_by_number(
     let number = sheet.unwrap_or_else(|| {
         snapshot
             .sheet_number(&snapshot.current)
-            .expect("今の紙は必ず存在する")
+            .expect("今のシートは必ず存在する")
     });
     let Some(sheet) = number
         .checked_sub(1)

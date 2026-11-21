@@ -8,6 +8,8 @@ mod ai_inbox;
 mod app;
 #[cfg(test)]
 mod app_icon;
+// The calculations of the export area window (tests also run on the development Linux)
+mod area_select;
 // The connection approval dialog is for macOS / Windows (tests also run on the development Linux)
 #[cfg(any(test, target_os = "macos", target_os = "windows"))]
 mod approval_dialog;
@@ -15,6 +17,18 @@ mod canvas;
 mod color;
 mod config;
 mod disconnect;
+// Exporting the canvas (PNG / PDF), used from the tray menu (tests also run on the development Linux)
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
+mod export;
+// The export dialog (format, target, save path). Same mechanism as the approval dialog
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
+mod export_dialog;
+// The steps of the tray menu's "Export…" item (the mark of whether an export is in progress is held by tray.rs)
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
+mod export_flow;
+// The export area window (macOS / Windows). The calculations are in area_select.rs
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod export_window;
 mod geometry;
 mod glyphs;
 #[cfg(any(test, target_os = "macos", target_os = "windows"))]
@@ -23,8 +37,13 @@ mod link_status;
 mod lock;
 mod mcp;
 mod net;
+// OS script parts shared by the approval and export dialogs (quoting and Command)
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
+mod os_script;
 mod pairing;
 mod paths;
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
+mod pdf;
 mod protocol;
 mod render;
 mod resume;

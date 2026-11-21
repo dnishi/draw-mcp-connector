@@ -70,7 +70,7 @@ describe('applySheetOp', () => {
   const apply = (sheets: readonly TestSheet[], current: string, op: SheetOp) =>
     applySheetOp(sheets, current, op, emptySheet, isEmpty);
 
-  it('addSheet は index の位置に差し込み、範囲外なら末尾に置く。今の紙は変えない', () => {
+  it('addSheet は index の位置に差し込み、範囲外なら末尾に置く。今のシートは変えない', () => {
     const sheets = [testSheet('a'), testSheet('b')];
     expect(
       ids(apply(sheets, 'a', { type: 'addSheet', id: 'c', index: 1 })!.sheets),
@@ -83,7 +83,7 @@ describe('applySheetOp', () => {
     ).toEqual(['a', 'b', 'c']);
   });
 
-  it('addSheet は同じ ID の紙がある・既に MAX_SHEETS 枚なら無視する', () => {
+  it('addSheet は同じ ID のシートがある・既に MAX_SHEETS 枚なら無視する', () => {
     const sheets = [testSheet('a')];
     expect(
       apply(sheets, 'a', { type: 'addSheet', id: 'a', index: 1 }),
@@ -96,7 +96,7 @@ describe('applySheetOp', () => {
     ).toBeNull();
   });
 
-  it('removeSheet は紙を消し、今の紙を消したときは消した位置の紙(末尾なら新しい末尾)が今の紙になる', () => {
+  it('removeSheet はシートを消し、今のシートを消したときは消した位置のシート(末尾なら新しい末尾)が今のシートになる', () => {
     const sheets = [testSheet('a'), testSheet('b'), testSheet('c')];
     // Removing the current sheet (b): the sheet at that position (c) becomes current
     const removedCurrent = apply(sheets, 'b', {
@@ -114,7 +114,7 @@ describe('applySheetOp', () => {
     );
   });
 
-  it('removeSheet は紙が無い・残り 1 枚なら無視する', () => {
+  it('removeSheet はシートが無い・残り 1 枚なら無視する', () => {
     const sheets = [testSheet('a'), testSheet('b')];
     expect(apply(sheets, 'a', { type: 'removeSheet', id: 'x' })).toBeNull();
     expect(
@@ -122,20 +122,20 @@ describe('applySheetOp', () => {
     ).toBeNull();
   });
 
-  it('selectSheet は今の紙を替える', () => {
+  it('selectSheet は今のシートを替える', () => {
     const sheets = [testSheet('a'), testSheet('b')];
     const selected = apply(sheets, 'a', { type: 'selectSheet', id: 'b' })!;
     expect(selected.current).toBe('b');
     expect(selected.sheets).toBe(sheets);
   });
 
-  it('selectSheet は紙が無い・既に今の紙なら無視する', () => {
+  it('selectSheet はシートが無い・既に今のシートなら無視する', () => {
     const sheets = [testSheet('a')];
     expect(apply(sheets, 'a', { type: 'selectSheet', id: 'x' })).toBeNull();
     expect(apply(sheets, 'a', { type: 'selectSheet', id: 'a' })).toBeNull();
   });
 
-  it('resetSheets は全部を消し、空の INITIAL_SHEET_ID の紙 1 枚にして今の紙にする', () => {
+  it('resetSheets は全部を消し、空の INITIAL_SHEET_ID のシート 1 枚にして今のシートにする', () => {
     const sheets = [testSheet('a'), testSheet('b')];
     const reset = apply(sheets, 'b', { type: 'resetSheets' })!;
     expect(ids(reset.sheets)).toEqual([INITIAL_SHEET_ID]);

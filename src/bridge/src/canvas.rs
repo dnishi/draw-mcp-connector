@@ -41,14 +41,14 @@ pub struct Change {
 }
 
 /// How one connected canvas page sees the canvas. Several devices may connect at once;
-/// strokes are shared by all, but the paper size (screen size) and visible area differ per device
+/// strokes are shared by all, but the sheet size (screen size) and visible area differ per device
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct CanvasView {
     /// Connection number (assigned per connection)
     pub id: u64,
     /// IP address of the device that has the page open
     pub ip: IpAddr,
-    /// Paper size. None if the page has not sent it
+    /// Sheet size. None if the page has not sent it
     pub page: Option<PageSize>,
     /// Area currently visible on the page
     pub viewport: Viewport,
@@ -72,7 +72,7 @@ impl Snapshot {
         self.sheets
             .iter()
             .find(|sheet| sheet.id == self.current)
-            .expect("今の紙は必ず存在する")
+            .expect("今のシートは必ず存在する")
     }
 
     /// Number of the sheet (counted from 1)
@@ -151,6 +151,8 @@ struct State {
     revision: u64,
     /// In order of connection number
     views: Vec<CanvasView>,
+    /// The last sheet size received from a connected page. Kept even if the page disconnects
+    page: Option<PageSize>,
     /// (revision after the change, change)
     log: VecDeque<(u64, CanvasOp)>,
 }
@@ -173,6 +175,7 @@ impl Default for State {
             image_data: ImageData::default(),
             revision: 0,
             views: Vec::new(),
+            page: None,
             log: VecDeque::new(),
         }
     }
@@ -332,6 +335,7 @@ impl Canvas {
             image_data: ImageData::default(),
             revision: saved.revision,
             views: Vec::new(),
+            page: saved.page,
             log: VecDeque::new(),
         };
         // Every saved image is placed, so none is dropped
@@ -371,13 +375,22 @@ impl Canvas {
         Some(applied)
     }
 
-    /// Remembers the visible area and paper size of a connected canvas page (does not bump the revision)
+    /// Remembers the visible area and sheet size of a connected canvas page (does not bump the revision)
     pub fn set_view(&self, view: CanvasView) {
         let mut state = self.state();
         match state.views.binary_search_by_key(&view.id, |v| v.id) {
             Ok(index) => state.views[index] = view,
             Err(index) => state.views.insert(index, view),
         }
+        // Remember the received sheet size (ignore 0 and non-finite values)
+        if let Some(page) = view.page.filter(PageSize::is_usable) {
+            state.page = Some(page);
+        }
+    }
+
+    /// The last sheet size received. None if never received
+    pub fn page(&self) -> Option<PageSize> {
+        self.state().page
     }
 
     /// Forgets how a closed connection saw the canvas
@@ -651,12 +664,12 @@ mod tests {
         assert_eq!(
             canvas.apply(Origin::Ai, CanvasOp::SelectSheet { id: "b".into() }),
             None,
-            "同じ紙は無視"
+            "同じシートは無視"
         );
         assert_eq!(
             canvas.apply(Origin::Ai, CanvasOp::SelectSheet { id: "none".into() }),
             None,
-            "無い紙は無視"
+            "無いシートは無視"
         );
         assert_eq!(canvas.snapshot().current, "b");
     }
@@ -832,6 +845,71 @@ mod tests {
 
         canvas.remove_view(1);
         assert_eq!(canvas.snapshot().views, [view(2, 400.0)]);
+    }
+
+    /// The sheet size is kept as the last one received. Invalid ones are ignored, it survives a disconnect,
+    /// and is replaced by the size received later from another connection
+    #[test]
+    fn the_page_size_is_kept_and_replaced_by_later_views() {
+        let view = |id: u64, page: Option<PageSize>| CanvasView {
+            id,
+            ip: IpAddr::from([192, 168, 0, id as u8]),
+            page,
+            viewport: Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 100.0,
+            },
+        };
+        let canvas = Canvas::new();
+        assert_eq!(canvas.page(), None, "まだ届いていない");
+
+        // Do not remember missing or invalid sizes
+        canvas.set_view(view(1, None));
+        canvas.set_view(view(
+            1,
+            Some(PageSize {
+                width: 0.0,
+                height: 100.0,
+            }),
+        ));
+        canvas.set_view(view(
+            1,
+            Some(PageSize {
+                width: f64::NAN,
+                height: 100.0,
+            }),
+        ));
+        assert_eq!(canvas.page(), None, "0 や NaN は無視");
+
+        // Remember a received size
+        let page = PageSize {
+            width: 1200.0,
+            height: 800.0,
+        };
+        canvas.set_view(view(1, Some(page)));
+        assert_eq!(canvas.page(), Some(page));
+
+        // Kept after a disconnect
+        canvas.remove_view(1);
+        assert_eq!(canvas.page(), Some(page));
+
+        // Replaced by the size from a later connection
+        canvas.set_view(view(
+            2,
+            Some(PageSize {
+                width: 768.0,
+                height: 1024.0,
+            }),
+        ));
+        assert_eq!(
+            canvas.page(),
+            Some(PageSize {
+                width: 768.0,
+                height: 1024.0
+            })
+        );
     }
 
     #[test]
@@ -1056,10 +1134,21 @@ mod tests {
                 },
             ],
             images: vec![("img".into(), vec![7])],
+            page: Some(PageSize {
+                width: 100.0,
+                height: 80.0,
+            }),
         };
         let canvas = Canvas::restored(saved);
         let snapshot = canvas.snapshot();
         assert_eq!(snapshot.sheets.len(), 2);
+        assert_eq!(
+            canvas.page(),
+            Some(PageSize {
+                width: 100.0,
+                height: 80.0
+            })
+        );
         assert_eq!(snapshot.sheets[1].image, Some(placement("img")));
         assert_eq!(snapshot.current, "b");
         assert_eq!(snapshot.revision, 2);

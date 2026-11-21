@@ -1,6 +1,7 @@
 //! Menu bar (macOS) / notification area (Windows) icon, and the QR code window.
-//! The app's only UI is the menu (connection status, "Show QR Code", "Open Canvas", "About", "Quit";
+//! The app's only UI is the menu (connection status, "Show QR Code", "Open Canvas", "Export…", "About", "Quit";
 //! a connected status line has a "Disconnect" submenu), the QR code window,
+//! the export area window (export_window.rs),
 //! and the connection approval dialog (approval_dialog.rs).
 //! On macOS the event loop and icon must run on the main thread (per the tray-icon documentation).
 
@@ -8,7 +9,7 @@ use std::sync::Arc;
 
 use tao::event::{Event, StartCause, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopWindowTarget};
-use tao::window::{Theme, Window, WindowBuilder};
+use tao::window::{Theme, Window, WindowBuilder, WindowId};
 use tracing::warn;
 use tray_icon::menu::{
     Icon as MenuIcon, IconMenuItem, IsMenuItem, Menu, MenuEvent, MenuId, MenuItem,
@@ -17,13 +18,17 @@ use tray_icon::menu::{
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
 use crate::app::App;
+use crate::area_select::{Outcome, SheetRenderJob};
 use crate::config;
+use crate::export_flow;
+use crate::export_window::ExportWindow;
 use crate::icon::{self, Appearance, Badge};
 use crate::link_status::LinkStatus;
 use crate::qr_window::QrWindow;
+use crate::render::{self, Rect};
 
 /// Events delivered to the event loop
-enum UserEvent {
+pub(crate) enum UserEvent {
     Menu(MenuEvent),
     /// Open the QR code window from another thread (MCP's connect_canvas, the first-run guide)
     ShowQr,
@@ -31,6 +36,10 @@ enum UserEvent {
     Status,
     /// The QR contents (address or token) changed (redraws an open QR window)
     Pairing,
+    /// The export flow asked for an area (open the area window, and call finish when it is decided)
+    ExportArea(export_flow::AreaRequest),
+    /// The sheet of the area window was drawn on another thread (the window id and the result)
+    SheetRendered(WindowId, SheetRenderJob, render::Pixels),
 }
 
 fn badge(status: LinkStatus) -> Badge {
@@ -237,6 +246,23 @@ fn show_qr(qr_window: &mut Option<QrWindow>, target: &EventLoopWindowTarget<User
     }
 }
 
+/// Closes the area window and finishes the export. area is the area on Export;
+/// None on Cancel (closing with ×, including keys)
+fn finish_export(
+    app: &Arc<App>,
+    state: &export_flow::ExportState,
+    window: Option<ExportWindow>,
+    area: Option<Rect>,
+) {
+    let Some(window) = window else {
+        return;
+    };
+    let request = window.request();
+    // Close the window before exporting (so it is gone before the save path dialog)
+    drop(window);
+    export_flow::finish(app.clone(), state, request, area);
+}
+
 /// Opens the canvas in this PC's default browser. The URL is the same as the QR code's (endpoint and token included),
 /// so it connects just like opening from the QR code, and the approval dialog appears
 fn open_canvas(app: &App) {
@@ -288,6 +314,7 @@ fn about_item() -> AboutItem {
 struct MenuItems {
     show_qr: MenuItem,
     open_canvas: MenuItem,
+    export: MenuItem,
     about: AboutItem,
     quit: MenuItem,
 }
@@ -303,6 +330,7 @@ fn create_indicator(
         &PredefinedMenuItem::separator(),
         &items.show_qr,
         &items.open_canvas,
+        &items.export,
         &items.about,
         &items.quit,
     ])
@@ -355,16 +383,21 @@ pub fn run(app: Arc<App>, start: impl FnOnce()) -> ! {
     app.pairing.set_listener(move || {
         let _ = proxy.send_event(UserEvent::Pairing);
     });
+    let proxy = event_loop.create_proxy();
+    let export_state = export_flow::ExportState::default();
     start();
 
     let items = MenuItems {
         show_qr: MenuItem::new("Show QR Code", true, None),
         open_canvas: MenuItem::new("Open Canvas", true, None),
+        export: MenuItem::new("Export…", true, None),
         about: about_item(),
         quit: MenuItem::new("Quit", true, None),
     };
     let mut indicator: Option<Indicator> = None;
     let mut qr_window: Option<QrWindow> = None;
+    // The export area window (at most one at a time)
+    let mut export_window: Option<ExportWindow> = None;
     // Invisible window used to learn the OS appearance (light / dark),
     // because tao reports the appearance only per window (Window::theme and WindowEvent::ThemeChanged)
     let mut theme_window: Option<Window> = None;
@@ -413,6 +446,36 @@ pub fn run(app: Arc<App>, start: impl FnOnce()) -> ! {
             Event::UserEvent(UserEvent::Menu(event)) if event.id == *items.open_canvas.id() => {
                 open_canvas(&app);
             }
+            Event::UserEvent(UserEvent::Menu(event)) if event.id == *items.export.id() => {
+                // If an export is in progress (the area window is open), just bring it to the front
+                if let Some(window) = &export_window {
+                    window.bring_to_front();
+                } else {
+                    // The closure is created for each event, so clone the proxy each time
+                    let proxy = proxy.clone();
+                    export_flow::start(app.clone(), &export_state, move |request| {
+                        let _ = proxy.send_event(UserEvent::ExportArea(request));
+                    });
+                }
+            }
+            Event::UserEvent(UserEvent::ExportArea(request)) => {
+                let proxy = proxy.clone();
+                match ExportWindow::open(target, &app, request, proxy) {
+                    Ok(window) => export_window = Some(window),
+                    Err(error) => {
+                        warn!("範囲を選ぶウィンドウを開けない: {error}");
+                        // Discard the export
+                        export_flow::finish(app.clone(), &export_state, request, None);
+                    }
+                }
+            }
+            // The sheet of the area window was drawn on another thread.
+            // Discard a result that arrived after the window closed
+            Event::UserEvent(UserEvent::SheetRendered(window_id, job, pixels)) => {
+                if let Some(window) = export_window.as_mut().filter(|w| w.id() == window_id) {
+                    window.sheet_rendered(job, pixels);
+                }
+            }
             #[cfg(target_os = "macos")]
             Event::UserEvent(UserEvent::Menu(event)) if event.id == *items.about.id() => {
                 crate::about::show();
@@ -420,6 +483,8 @@ pub fn run(app: Arc<App>, start: impl FnOnce()) -> ! {
             Event::UserEvent(UserEvent::Menu(event)) if event.id == *items.quit.id() => {
                 // Write the current state right away before quitting
                 app.save_now();
+                // Close the area window if it is open (discard the export)
+                export_window.take();
                 qr_window.take();
                 indicator.take();
                 *control_flow = ControlFlow::Exit;
@@ -435,6 +500,8 @@ pub fn run(app: Arc<App>, start: impl FnOnce()) -> ! {
             Event::RedrawRequested(id) => {
                 if let Some(window) = qr_window.as_mut().filter(|w| w.id() == id) {
                     window.redraw(&app);
+                } else if let Some(window) = export_window.as_mut().filter(|w| w.id() == id) {
+                    window.redraw();
                 }
             }
             Event::WindowEvent {
@@ -460,6 +527,27 @@ pub fn run(app: Arc<App>, start: impl FnOnce()) -> ! {
                 }
                 _ => {}
             },
+            // Events of the area window (export). Events of the QR window are taken
+            // by the arm above, so pass only the area window here
+            Event::WindowEvent {
+                window_id, event, ..
+            } => {
+                let Some(window) = export_window.as_mut().filter(|w| w.id() == window_id) else {
+                    return;
+                };
+                match event {
+                    // Closing the window (×) is Cancel
+                    WindowEvent::CloseRequested => {
+                        finish_export(&app, &export_state, export_window.take(), None);
+                    }
+                    _ => {
+                        if let Some(outcome) = window.event(&event) {
+                            let area = (outcome == Outcome::Export).then(|| window.area());
+                            finish_export(&app, &export_state, export_window.take(), area);
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     })

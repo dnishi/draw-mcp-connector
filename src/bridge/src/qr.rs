@@ -130,11 +130,11 @@ fn gf_multiply(a: u8, b: u8) -> u8 {
 /// Coefficients of the generator polynomial (x - α^0)(x - α^1)…(x - α^(degree-1)) (highest first, excluding the leading 1)
 fn generator_polynomial(degree: usize) -> Vec<u8> {
     let mut poly = vec![1u8];
-    for i in 0..degree {
+    for &factor in GF.exp.iter().take(degree) {
         let mut next = vec![0u8; poly.len() + 1];
         for (j, &coefficient) in poly.iter().enumerate() {
             next[j] ^= coefficient;
-            next[j + 1] ^= gf_multiply(coefficient, GF.exp[i]);
+            next[j + 1] ^= gf_multiply(coefficient, factor);
         }
         poly = next;
     }

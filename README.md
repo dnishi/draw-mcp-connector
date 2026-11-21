@@ -29,7 +29,7 @@ The canvas is a page you open in a browser. It works on an iPad, smartphone, tab
 
 Several devices can connect at once. Strokes are shared across all devices, and the menu shows one line per connected device with its state and IP address.
 
-If the connection drops after you allowed it, reconnecting from the same tab within 1 minute (reloading the page, or the connection status at the top of the sidebar) connects again without the dialog. After closing the tab or after 1 minute, press "Allow" ("Yes" on Windows) again. If another page takes over this page's connection and reconnects, this page is disconnected and a dialog tells you so.
+If the connection drops after you allowed it, reconnecting from the same tab within 1 minute (reloading the page, or the connection status at the top right) connects again without the dialog. After closing the tab or after 1 minute, press "Allow" ("Yes" on Windows) again. If another page takes over this page's connection and reconnects, this page is disconnected and a dialog tells you so.
 
 ## Opening in the browser on your PC
 
@@ -38,6 +38,13 @@ Choose "Open Canvas" from the Draw MCP Connector icon in the menu bar to open th
 ## Shapes and text drawn by the AI
 
 With the MCP tool `draw_shapes`, AI agents can draw polylines, rectangles, ellipses, and text on the canvas. Sending shapes and strings instead of point lists keeps the AI's token usage low. What the AI draws becomes ordinary strokes on the canvas, just like handwriting.
+
+## Exporting to PNG and PDF
+
+The canvas can be exported to a PNG or PDF file. A PNG is the current sheet; a PDF is the current sheet or all sheets (each sheet is one page). For the current sheet, you can choose the area to export (it starts as the whole sheet).
+
+- Canvas page: "Export…" in the menu at the left end of the menu bar at the top. Choose the format, area, and file name in the panel, and save it with the browser's download (on an iPad, it goes into the "Files" app)
+- PC app: "Export…" from the Draw MCP Connector icon in the menu bar. Choose the format, then the area window, then the save dialog, in that order. You can't export if the canvas has never been connected (the sheet size is taken from the canvas page)
 
 ## Saving the canvas
 

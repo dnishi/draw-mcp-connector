@@ -4,15 +4,14 @@
 
 use std::io::Read;
 use std::net::IpAddr;
-#[cfg(target_os = "windows")]
-use std::os::windows::process::CommandExt;
-use std::process::{Child, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdout, Stdio};
 use std::sync::Mutex;
 
 use tracing::warn;
 
 use crate::config;
 use crate::lock::lock;
+use crate::os_script;
 use crate::ui::ApprovalPrompt;
 
 const ALLOW: &str = "Allow";
@@ -23,24 +22,17 @@ fn message(ip: IpAddr) -> String {
     format!("Allow the canvas at {ip} to connect?")
 }
 
-/// Escapes characters that have a special meaning inside an AppleScript string
-#[cfg_attr(target_os = "windows", allow(dead_code))]
-fn apple_quote(text: &str) -> String {
-    format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
-}
-
 /// macOS: the AppleScript that shows the approval dialog
-#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn apple_script(ip: IpAddr) -> String {
     let text = message(ip);
     // Make Deny the default button so that pressing Enter does not approve
     format!(
         "display dialog {text} with title {title} buttons {{{deny}, {allow}}} \
          default button {deny} cancel button {deny} giving up after {seconds} with icon caution",
-        text = apple_quote(&text),
-        title = apple_quote(config::APP_NAME),
-        deny = apple_quote(DENY),
-        allow = apple_quote(ALLOW),
+        text = os_script::apple_quote(&text),
+        title = os_script::apple_quote(config::APP_NAME),
+        deny = os_script::apple_quote(DENY),
+        allow = os_script::apple_quote(ALLOW),
         seconds = config::USER_RESPONSE_TIMEOUT.as_secs(),
     )
 }
@@ -51,12 +43,7 @@ fn apple_allowed(stdout: &str) -> bool {
     stdout.contains(&format!("button returned:{ALLOW}")) && !stdout.contains("gave up:true")
 }
 
-// uType of MessageBoxW (source: Microsoft "MessageBox function (winuser.h)")
-const MB_YESNO: u32 = 0x0000_0004;
-const MB_ICONWARNING: u32 = 0x0000_0030;
-const MB_DEFBUTTON2: u32 = 0x0000_0100;
-const MB_SETFOREGROUND: u32 = 0x0001_0000;
-const MB_TOPMOST: u32 = 0x0004_0000;
+// The uType of MessageBoxW is shared with the export dialog and lives in os_script.rs
 /// Value MessageBoxW returns for Yes (IDYES)
 const ID_YES: i32 = 6;
 
@@ -65,27 +52,23 @@ const ID_YES: i32 = 6;
 /// so the dialog does not hide behind other windows. Windows restricts when MB_SETFOREGROUND can make it
 /// the foreground window (while the user works in another window, it may only flash the taskbar button;
 /// source: Microsoft "SetForegroundWindow function"), but MB_TOPMOST works independently of that
-const WINDOWS_DIALOG_FLAGS: u32 =
-    MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2 | MB_TOPMOST | MB_SETFOREGROUND;
-
-/// Windows: inside a single-quoted PowerShell string, `''` stands for one `'`
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-fn ps_quote(text: &str) -> String {
-    format!("'{}'", text.replace('\'', "''"))
-}
+const WINDOWS_DIALOG_FLAGS: u32 = os_script::MB_YESNO
+    | os_script::MB_ICONWARNING
+    | os_script::MB_DEFBUTTON2
+    | os_script::MB_TOPMOST
+    | os_script::MB_SETFOREGROUND;
 
 /// Windows: the PowerShell script that shows the Win32 MessageBoxW and writes out the answer's value.
 /// `$q = [char]34` is the double quote character. C#'s `DllImport("user32.dll")` contains double quotes,
 /// so it is built inside PowerShell to keep double quotes off the command line
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn ps_script(ip: IpAddr) -> String {
     format!(
         "$q = [char]34; \
          Add-Type -Namespace DrawMcp -Name Native -MemberDefinition ('[DllImport(' + $q + 'user32.dll' + $q + ', CharSet = CharSet.Unicode)] public static extern int MessageBoxW(IntPtr hWnd, string lpText, string lpCaption, uint uType);'); \
          $answer = [DrawMcp.Native]::MessageBoxW([IntPtr]::Zero, {text}, {title}, {flags}); \
          Write-Output $answer",
-        text = ps_quote(&message(ip)),
-        title = ps_quote(config::APP_NAME),
+        text = os_script::ps_quote(&message(ip)),
+        title = os_script::ps_quote(config::APP_NAME),
         flags = WINDOWS_DIALOG_FLAGS,
     )
 }
@@ -108,30 +91,6 @@ fn is_allowed(stdout: &str) -> bool {
     }
 }
 
-// Create the process without a console window (source: Microsoft "Process Creation Flags")
-#[cfg(target_os = "windows")]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-/// The command that shows the approval dialog (osascript on macOS, PowerShell on Windows)
-// On OSes other than macOS and Windows, this is compiled only for tests on the development Linux
-#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
-fn command(ip: IpAddr) -> Command {
-    #[cfg(target_os = "windows")]
-    {
-        let mut command = Command::new("powershell.exe");
-        command.args(["-NoProfile", "-NonInteractive", "-Command", &ps_script(ip)]);
-        command.creation_flags(CREATE_NO_WINDOW);
-        command
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        // activate: bring the dialog in front of other apps
-        let mut command = Command::new("osascript");
-        command.args(["-e", "activate", "-e", &apple_script(ip)]);
-        command
-    }
-}
-
 /// A shown dialog (the osascript or PowerShell process). Empty if it could not be shown, which counts as a denial
 #[derive(Default)]
 pub struct Dialog {
@@ -140,11 +99,12 @@ pub struct Dialog {
     stdout: Mutex<Option<ChildStdout>>,
 }
 
-/// Shows the dialog. Does not wait for the answer
+/// Shows the dialog. Does not wait for the answer (the approval dialog must be closable without one,
+/// so it is not a "wait" function like os_script::run)
 // On OSes other than macOS and Windows, this is compiled only for tests on the development Linux
 #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
 pub fn ask(ip: IpAddr) -> Dialog {
-    let spawned = command(ip)
+    let spawned = os_script::command(&apple_script(ip), &ps_script(ip))
         .stdout(Stdio::piped())
         // Do not show the output on denial or error
         .stderr(Stdio::null())
@@ -201,11 +161,6 @@ mod tests {
     }
 
     #[test]
-    fn quotes_special_characters() {
-        assert_eq!(apple_quote(r#"a"b\c"#), r#""a\"b\\c""#);
-    }
-
-    #[test]
     fn reads_the_answer() {
         assert!(apple_allowed("button returned:Allow, gave up:false\n"));
         assert!(!apple_allowed("button returned:, gave up:true\n"));
@@ -231,12 +186,6 @@ mod tests {
     fn windows_dialog_flags_are_topmost() {
         // 0x00000004 + 0x00000030 + 0x00000100 + 0x00010000 + 0x00040000
         assert_eq!(WINDOWS_DIALOG_FLAGS, 0x0005_0134);
-    }
-
-    #[test]
-    fn quotes_special_characters_for_windows() {
-        assert_eq!(ps_quote("a'b"), "'a''b'");
-        assert_eq!(ps_quote("abc"), "'abc'");
     }
 
     #[test]

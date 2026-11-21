@@ -8,11 +8,16 @@ declare const GPUBufferUsage: {
   readonly COPY_DST: number;
   readonly VERTEX: number;
   readonly UNIFORM: number;
+  readonly MAP_READ: number;
+};
+declare const GPUMapMode: {
+  readonly READ: number;
 };
 declare const GPUTextureUsage: {
   readonly RENDER_ATTACHMENT: number;
   readonly TEXTURE_BINDING: number;
   readonly COPY_DST: number;
+  readonly COPY_SRC: number;
 };
 declare const GPUShaderStage: {
   readonly VERTEX: number;
@@ -215,6 +220,20 @@ export interface ImageUnderlay {
 /** One image vertex: x, y (canvas coordinates) and u, v (position within the image) */
 const FLOATS_PER_IMAGE_VERTEX = 4;
 const IMAGE_VERTEX_COUNT = 6;
+
+/**
+ * How many drawing pixels one image pixel becomes (placement width × display zoom × devicePixelRatio).
+ * Read from the mip chain by the amount it shrinks below 1 (log2). 0 (level 0) when enlarged
+ */
+function imageLod(
+  image: ImageUnderlay,
+  scale: number,
+  pixelRatio: number,
+): number {
+  const screenPerSourcePixel =
+    (image.width * scale * pixelRatio) / image.bitmap.width;
+  return Math.max(0, -Math.log2(screenPerSourcePixel));
+}
 
 /** Draws stroke triangles onto the canvas with WebGPU */
 export class StrokeRenderer {
@@ -433,16 +452,10 @@ export class StrokeRenderer {
 
     if (image) {
       this.#syncImageTexture(image.bitmap);
-      // How many drawing pixels one image pixel becomes (placement width × display zoom × devicePixelRatio).
-      // Read from the mip chain by the amount it shrinks below 1 (log2). 0 (level 0) when enlarged
-      const screenPerSourcePixel =
-        (image.width * view.scale * this.#devicePixelRatio) /
-        image.bitmap.width;
-      const lod = Math.max(0, -Math.log2(screenPerSourcePixel));
       this.#device.queue.writeBuffer(
         this.#viewportBuffer,
         IMAGE_LOD_OFFSET_BYTES,
-        new Float32Array([lod]),
+        new Float32Array([imageLod(image, view.scale, this.#devicePixelRatio)]),
       );
     }
     const committedBuffer = this.#committedVertexBuffer;
@@ -505,6 +518,190 @@ export class StrokeRenderer {
     this.#device.queue.submit([encoder.finish()]);
   }
 
+  /**
+   * Export: returns the pixels of the area (canvas CSS pixels) drawn at pixelRatio times,
+   * on a white background with the image and then the strokes. The write target is separate from
+   * the screen's texture and buffers, so drawing the screen during the export does not corrupt it
+   */
+  async renderArea(
+    vertices: Float32Array,
+    image: ImageUnderlay | undefined,
+    area: { x: number; y: number; width: number; height: number },
+    pixelRatio: number,
+  ): Promise<{
+    width: number;
+    height: number;
+    rgba: Uint8ClampedArray<ArrayBuffer>;
+  }> {
+    const width = Math.max(1, Math.round(area.width * pixelRatio));
+    const height = Math.max(1, Math.round(area.height * pixelRatio));
+    const maxTextureDimension = this.#device.limits.maxTextureDimension2D;
+    if (width > maxTextureDimension || height > maxTextureDimension) {
+      throw new Error('The area is too large to export.');
+    }
+
+    // Viewport buffer (and bind group) for the export. The screen's #viewportBuffer is not used
+    const viewportBuffer = this.#device.createBuffer({
+      size: VIEWPORT_BYTES,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    const bindGroup = this.#device.createBindGroup({
+      layout: this.#pipeline.getBindGroupLayout(0),
+      entries: [{ binding: 0, resource: { buffer: viewportBuffer } }],
+    });
+    // The write target uses the same format as the screen. COPY_SRC is added to read the pixels
+    const target = this.#device.createTexture({
+      size: [width, height],
+      format: this.#format,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
+    });
+    const msaa = this.#device.createTexture({
+      size: [width, height],
+      format: this.#format,
+      sampleCount: SAMPLE_COUNT,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT,
+    });
+
+    let imageTexture: GPUTexture | undefined;
+    let imageBindGroup: GPUBindGroup | undefined;
+    let imageQuadBuffer: GPUBuffer | undefined;
+    let vertexBuffer: GPUBuffer | undefined;
+    let readBuffer: GPUBuffer | undefined;
+    try {
+      if (image) {
+        // The image's texture and buffer are separate too (discarded at the end)
+        imageTexture = this.#createImageTexture(image.bitmap);
+        imageBindGroup = this.#createImageBindGroup(
+          viewportBuffer,
+          imageTexture,
+        );
+        imageQuadBuffer = this.#device.createBuffer({
+          size:
+            IMAGE_VERTEX_COUNT *
+            FLOATS_PER_IMAGE_VERTEX *
+            Float32Array.BYTES_PER_ELEMENT,
+          usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+        });
+        this.#device.queue.writeBuffer(
+          imageQuadBuffer,
+          0,
+          this.#imageQuadVertices(image),
+        );
+      }
+
+      // size and origin are area, scale is 1, and lod uses the same formula as draw
+      this.#device.queue.writeBuffer(
+        viewportBuffer,
+        0,
+        new Float32Array([
+          area.width,
+          area.height,
+          area.x,
+          area.y,
+          1,
+          pixelRatio,
+          image ? imageLod(image, 1, pixelRatio) : 0,
+          0,
+        ]),
+      );
+
+      // Buffer of the stroke vertices (built the same way as the committed strokes buffer). Not drawn if empty
+      const vertexCount = vertices.length / FLOATS_PER_VERTEX;
+      if (vertexCount > 0) {
+        vertexBuffer = this.#device.createBuffer({
+          size: vertices.byteLength,
+          usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+        });
+        this.#device.queue.writeBuffer(vertexBuffer, 0, vertices);
+      }
+
+      const encoder = this.#device.createCommandEncoder();
+      const pass = encoder.beginRenderPass({
+        colorAttachments: [
+          {
+            view: msaa.createView(),
+            resolveTarget: target.createView(),
+            clearValue: WHITE,
+            loadOp: 'clear',
+            // Read back from the resolveTarget (target), so the multisample one is discarded
+            storeOp: 'discard',
+          },
+        ],
+      });
+      // No grid. The order is the same as the screen (white background → image → strokes)
+      if (image && imageTexture && imageBindGroup && imageQuadBuffer) {
+        pass.setPipeline(this.#imagePipeline);
+        pass.setBindGroup(0, imageBindGroup);
+        pass.setVertexBuffer(
+          0,
+          imageQuadBuffer,
+          0,
+          IMAGE_VERTEX_COUNT *
+            FLOATS_PER_IMAGE_VERTEX *
+            Float32Array.BYTES_PER_ELEMENT,
+        );
+        pass.draw(IMAGE_VERTEX_COUNT);
+      }
+      if (vertexBuffer) {
+        pass.setPipeline(this.#pipeline);
+        pass.setBindGroup(0, bindGroup);
+        pass.setVertexBuffer(
+          0,
+          vertexBuffer,
+          0,
+          vertexCount * BYTES_PER_VERTEX,
+        );
+        pass.draw(vertexCount);
+      }
+      pass.end();
+
+      // Reading the pixels: copy to a buffer and read it with map (bytes per row must be a multiple of 256)
+      const bytesPerRow = Math.ceil((width * 4) / 256) * 256;
+      readBuffer = this.#device.createBuffer({
+        size: bytesPerRow * height,
+        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+      });
+      encoder.copyTextureToBuffer(
+        { texture: target },
+        { buffer: readBuffer, bytesPerRow, offset: 0 },
+        { width, height, depthOrArrayLayers: 1 },
+      );
+      this.#device.queue.submit([encoder.finish()]);
+      await readBuffer.mapAsync(GPUMapMode.READ);
+      const mapped = readBuffer.getMappedRange();
+      const rgba = new Uint8ClampedArray(width * height * 4);
+      // Pack each row into 4 bytes × width. Swap R and B when the canvas format is bgra8unorm
+      const swap = this.#format === 'bgra8unorm';
+      const rowBytes = width * 4;
+      for (let y = 0; y < height; y++) {
+        const source = new Uint8Array(mapped, y * bytesPerRow, rowBytes);
+        const line = rgba.subarray(y * rowBytes, (y + 1) * rowBytes);
+        if (swap) {
+          for (let x = 0; x < width; x++) {
+            line[4 * x] = source[4 * x + 2];
+            line[4 * x + 1] = source[4 * x + 1];
+            line[4 * x + 2] = source[4 * x];
+            line[4 * x + 3] = source[4 * x + 3];
+          }
+        } else {
+          line.set(source);
+        }
+      }
+      readBuffer.unmap();
+
+      return { width, height, rgba };
+    } finally {
+      // Discard the buffers and textures used by the export
+      viewportBuffer.destroy();
+      target.destroy();
+      msaa.destroy();
+      imageTexture?.destroy();
+      imageQuadBuffer?.destroy();
+      vertexBuffer?.destroy();
+      readBuffer?.destroy();
+    }
+  }
+
   destroy(): void {
     this.#imageTexture?.destroy();
     this.#device.destroy();
@@ -516,10 +713,35 @@ export class StrokeRenderer {
       return;
     }
     this.#imageTexture?.destroy();
+    this.#imageTexture = this.#createImageTexture(bitmap);
+    this.#imageBindGroup = this.#createImageBindGroup(
+      this.#viewportBuffer,
+      this.#imageTexture,
+    );
+    this.#imageBitmap = bitmap;
+  }
+
+  /** Bind group for drawing the image (viewport, the image texture, and the sampler) */
+  #createImageBindGroup(
+    viewportBuffer: GPUBuffer,
+    texture: GPUTexture,
+  ): GPUBindGroup {
+    return this.#device.createBindGroup({
+      layout: this.#imagePipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: viewportBuffer } },
+        { binding: 1, resource: texture.createView() },
+        { binding: 2, resource: this.#sampler },
+      ],
+    });
+  }
+
+  /** Puts a bitmap into a texture with a mip chain (used by both the screen and the export) */
+  #createImageTexture(bitmap: ImageBitmap): GPUTexture {
     // Number of levels: down to the level where the longer side is 1 pixel (level L is 1/2^L of the original, rounded down)
     const mipLevelCount =
       1 + Math.floor(Math.log2(Math.max(bitmap.width, bitmap.height)));
-    this.#imageTexture = this.#device.createTexture({
+    const texture = this.#device.createTexture({
       size: [bitmap.width, bitmap.height],
       format: IMAGE_TEXTURE_FORMAT,
       mipLevelCount,
@@ -537,25 +759,17 @@ export class StrokeRenderer {
     // uv is used as is (#writeImageQuad)
     this.#device.queue.copyExternalImageToTexture(
       { source: bitmap },
-      { texture: this.#imageTexture, premultipliedAlpha: true },
+      { texture, premultipliedAlpha: true },
       [bitmap.width, bitmap.height],
     );
-    this.#buildMipLevels(mipLevelCount);
-    this.#imageBindGroup = this.#device.createBindGroup({
-      layout: this.#imagePipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: { buffer: this.#viewportBuffer } },
-        { binding: 1, resource: this.#imageTexture.createView() },
-        { binding: 2, resource: this.#sampler },
-      ],
-    });
-    this.#imageBitmap = bitmap;
+    this.#buildMipLevels(texture);
+    return texture;
   }
 
   /** Builds level 1 onward of a texture whose level 0 is loaded, drawing each at half size */
-  #buildMipLevels(mipLevelCount: number): void {
-    const texture = this.#imageTexture;
-    if (!texture || mipLevelCount < 2) {
+  #buildMipLevels(texture: GPUTexture): void {
+    const mipLevelCount = texture.mipLevelCount;
+    if (mipLevelCount < 2) {
       return;
     }
     const encoder = this.#device.createCommandEncoder();
@@ -596,7 +810,6 @@ export class StrokeRenderer {
 
   /** Turns the placement rectangle into two triangles with uv */
   #writeImageQuad(image: ImageUnderlay): GPUBuffer {
-    const { x, y, width, height } = image;
     if (!this.#imageVertexBuffer) {
       this.#imageVertexBuffer = this.#device.createBuffer({
         size:
@@ -606,38 +819,44 @@ export class StrokeRenderer {
         usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
       });
     }
-    // The top edge (canvas y) is v=0 and the bottom edge (y + height) is v=1 (same as the texture row direction)
     this.#device.queue.writeBuffer(
       this.#imageVertexBuffer,
       0,
-      new Float32Array([
-        x,
-        y,
-        0,
-        0,
-        x + width,
-        y,
-        1,
-        0,
-        x,
-        y + height,
-        0,
-        1,
-        x + width,
-        y,
-        1,
-        0,
-        x + width,
-        y + height,
-        1,
-        1,
-        x,
-        y + height,
-        0,
-        1,
-      ]),
+      this.#imageQuadVertices(image),
     );
     return this.#imageVertexBuffer;
+  }
+
+  /** Turns the placement rectangle into two triangles with uv */
+  #imageQuadVertices(image: ImageUnderlay): Float32Array {
+    const { x, y, width, height } = image;
+    // The top edge (canvas y) is v=0 and the bottom edge (y + height) is v=1 (same as the texture row direction)
+    return new Float32Array([
+      x,
+      y,
+      0,
+      0,
+      x + width,
+      y,
+      1,
+      0,
+      x,
+      y + height,
+      0,
+      1,
+      x + width,
+      y,
+      1,
+      0,
+      x + width,
+      y + height,
+      1,
+      1,
+      x,
+      y + height,
+      0,
+      1,
+    ]);
   }
 
   /**

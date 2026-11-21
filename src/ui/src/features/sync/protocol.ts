@@ -31,7 +31,7 @@ The bytes are sent on a separate stream (ImageStream) */
 export type ClientMessage =
   /** Sent first after connecting. token is the one-time token from the QR code URL */
   | { type: 'hello'; token: string; viewport: Viewport; page?: PageSize | null; protocol?: number; resume?: string | null }
-  /** The visible area or paper size changed (screen size, zoom, pan) */
+  /** The visible area or sheet size changed (screen size, zoom, pan) */
   | { type: 'resize'; viewport: Viewport; page?: PageSize | null }
   /** An operation made on the page. seq is the number the page gives each operation (increasing within the page).
 After handling the operation (applied or ignored), the bridge returns an `Ack` with the same number.
@@ -59,7 +59,7 @@ export type ImageStream =
   /** The bytes of the image with the given ID are requested. Not sent if it does not have them */
   | { type: 'request'; id: string };
 
-/** Size of the canvas (paper) in CSS pixels. The paper starts at (0, 0) and matches the canvas area on the page (what is visible at 100%) */
+/** Size of the canvas (sheet) in CSS pixels. The sheet starts at (0, 0) and matches the canvas area on the page (what is visible at 100%) */
 export interface PageSize {
   width: number;
   height: number;
@@ -90,7 +90,7 @@ this number from those to resend */
 picked up by the AI yet (queued). Sent when syncing starts (right after snapshot) and when it changes */
   | { type: 'aiStatus'; waiting: boolean; queued: boolean };
 
-/** Contents of one sheet. The paper size (PageSize) is each connection's screen size and is not kept per sheet */
+/** Contents of one sheet. The sheet size (PageSize) is each connection's screen size and is not kept per sheet */
 export interface Sheet {
   /** ID unique across the whole canvas */
   id: string;

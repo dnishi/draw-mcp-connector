@@ -28,7 +28,7 @@ const MAX_SOURCE_SIDE: u32 = 4096;
 /// Lower limit of the radius on the image (pixels), so that lines do not vanish when drawn shrunk
 const MIN_PIXEL_RADIUS: f32 = 0.5;
 
-fn radius_at(pressure: f64) -> f64 {
+pub(crate) fn radius_at(pressure: f64) -> f64 {
     PEN_MAX_RADIUS * pressure.max(MIN_PRESSURE)
 }
 
@@ -42,7 +42,8 @@ pub struct Rect {
 }
 
 impl Rect {
-    fn from_edges(left: f64, top: f64, right: f64, bottom: f64) -> Self {
+    /// Makes one from the left, top, right, and bottom edges
+    pub(crate) fn from_edges(left: f64, top: f64, right: f64, bottom: f64) -> Self {
         Self {
             x: left,
             y: top,
@@ -51,11 +52,13 @@ impl Rect {
         }
     }
 
-    fn right(&self) -> f64 {
+    /// The right edge (also used in the window that selects the export area, area_select.rs)
+    pub(crate) fn right(&self) -> f64 {
         self.x + self.width
     }
 
-    fn bottom(&self) -> f64 {
+    /// The bottom edge (also used in the window that selects the export area, area_select.rs)
+    pub(crate) fn bottom(&self) -> f64 {
         self.y + self.height
     }
 
@@ -74,7 +77,7 @@ impl Rect {
         let top = self.y.max(other.y);
         let right = self.right().min(other.right());
         let bottom = self.bottom().min(other.bottom());
-        // No overlap if the width or height is 0 (an image exactly touching the paper edge is outside the paper)
+        // No overlap if the width or height is 0 (an image exactly touching the sheet edge is outside the sheet)
         if right <= left || bottom <= top {
             return None;
         }
@@ -94,7 +97,7 @@ impl From<Viewport> for Rect {
 }
 
 impl From<PageSize> for Rect {
-    /// The paper starts at (0, 0)
+    /// The sheet starts at (0, 0)
     fn from(page: PageSize) -> Self {
         Self::from_edges(0.0, 0.0, page.width, page.height)
     }
@@ -121,7 +124,7 @@ fn lerp(a: &StrokePoint, b: &StrokePoint, t: f64) -> StrokePoint {
 }
 
 /// Rounds corners once with Chaikin's algorithm. The first and last points do not move (smoothPoints in stroke.ts)
-fn smooth_points(points: &[StrokePoint]) -> Vec<StrokePoint> {
+pub(crate) fn smooth_points(points: &[StrokePoint]) -> Vec<StrokePoint> {
     let (Some(first), Some(last)) = (points.first(), points.last()) else {
         return Vec::new();
     };
@@ -135,6 +138,13 @@ fn smooth_points(points: &[StrokePoint]) -> Vec<StrokePoint> {
     }
     smoothed.push(last.clone());
     smoothed
+}
+
+/// The drawn pixels (RGB 8 bit, rows from the top left)
+pub struct Pixels {
+    pub width: u32,
+    pub height: u32,
+    pub rgb: Vec<u8>,
 }
 
 /// The drawn image and which part of the canvas it shows
@@ -283,6 +293,30 @@ fn decode_png(bytes: &[u8]) -> Option<DecodedImage> {
     Some((info.width, info.height, pixels))
 }
 
+/// The decoded image's RGBA with alpha divided back out (the original colors). PDF pastes
+/// the image's colors and alpha separately as they are, so it cannot use the premultiplied
+/// form for drawing. The color of a pixel whose alpha is 0 is undefined, so it is set to 0.
+/// Images that cannot be read or decoded are None
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
+pub(crate) fn unpremultiplied_rgba(stored: &StoredImage) -> Option<(u32, u32, Vec<u8>)> {
+    let decoded = stored.decoded()?;
+    let (width, height, premultiplied) = decoded.as_ref();
+    let mut rgba = vec![0u8; premultiplied.len()];
+    for (dst, pixel) in rgba.chunks_mut(4).zip(premultiplied.chunks(4)) {
+        let alpha = u32::from(pixel[3]);
+        if alpha == 0 {
+            continue;
+        }
+        for (channel, value) in dst.iter_mut().zip(pixel[..3].iter()) {
+            // The inverse of the multiplication (color * alpha / 255, rounded): a rounded division
+            // Even if a broken image's color exceeds its alpha, clamp it to 255
+            *channel = ((u32::from(*value) * 255 + alpha / 2) / alpha).min(255) as u8;
+        }
+        dst[3] = pixel[3];
+    }
+    Some((*width, *height, rgba))
+}
+
 /// RGBA of the source image pixel at (x, y) (premultiplied by alpha, 0 to 1)
 fn texel((width, _, rgba): &DecodedImage, x: usize, y: usize) -> [f32; 4] {
     let at = (y * *width as usize + x) * 4;
@@ -349,9 +383,9 @@ fn bilinear(image: &DecodedImage, x: f64, y: f64) -> [f32; 4] {
     lerp(upper, lower, fy)
 }
 
-/// Draws the regions (areas that are always captured, such as the paper and the visible area) and the area containing all strokes.
+/// Draws the regions (areas that are always captured, such as the sheet and the visible area) and the area containing all strokes.
 /// The image (laid under the strokes) adds only its overlap with clip to the area. clip is the area visible to the user
-/// (the paper of connected pages); if it is None (paper unknown), the whole image area is added.
+/// (the sheet of connected pages); if it is None (sheet unknown), the whole image area is added.
 /// The image is added to the area even if its bytes cannot be decoded. None if there is nothing
 ///
 /// clip is used only to decide the area. Drawing already draws only the pixels within the output area
@@ -362,7 +396,7 @@ pub fn render(
     image: Option<(&ImagePlacement, &StoredImage)>,
     clip: Option<Rect>,
 ) -> Result<Option<CanvasImage>, png::EncodingError> {
-    // The user cannot see an image outside the paper either, so it does not widen the captured area
+    // The user cannot see an image outside the sheet either, so it does not widen the captured area
     let image_bounds = image
         .map(|(placement, _)| Rect {
             x: placement.x,
@@ -392,10 +426,36 @@ pub fn render(
     );
     // If both width and height are 0, MAX_IMAGE_SIDE / 0 is infinite and clamps to 1
     let scale = (MAX_IMAGE_SIDE / area.width.max(area.height)).min(1.0);
+    let drawn = render_area(strokes, image, area, scale);
+    Ok(Some(CanvasImage {
+        png: encode_png(&drawn)?,
+        area,
+        scale,
+    }))
+}
+
+/// Draws the area (in canvas CSS pixels) with a pixel count scaled by scale.
+/// The pixel count is the same calculation as `render` (round `length * scale`, minimum 1)
+pub fn render_area(
+    strokes: &[Stroke],
+    image: Option<(&ImagePlacement, &StoredImage)>,
+    area: Rect,
+    scale: f64,
+) -> Pixels {
+    render_area_on([255, 255, 255], strokes, image, area, scale)
+}
+
+/// Like `render_area`, but the background for the pixels without strokes (RGB 0 to 255) can be passed
+pub fn render_area_on(
+    background: [u8; 3],
+    strokes: &[Stroke],
+    image: Option<(&ImagePlacement, &StoredImage)>,
+    area: Rect,
+    scale: f64,
+) -> Pixels {
     // Use round, because ceil adds a pixel from rounding errors when scaling down (2000.0000001, etc.)
     let pixels = |length: f64| ((length * scale).round() as u32).max(1);
-
-    let mut raster = Raster::new(pixels(area.width), pixels(area.height));
+    let mut raster = Raster::new(pixels(area.width), pixels(area.height), background);
     if let Some((placement, stored)) = image
         && let Some(decoded) = stored.decoded()
     {
@@ -404,11 +464,19 @@ pub fn render(
     for stroke in strokes {
         raster.draw_stroke(stroke, area, scale);
     }
-    Ok(Some(CanvasImage {
-        png: raster.to_png()?,
-        area,
-        scale,
-    }))
+    raster.into_pixels()
+}
+
+/// Encodes the drawn pixels into a PNG (RGB 8 bit, non-interlaced)
+pub fn encode_png(pixels: &Pixels) -> Result<Vec<u8>, png::EncodingError> {
+    let mut png = Vec::new();
+    let mut encoder = png::Encoder::new(&mut png, pixels.width, pixels.height);
+    encoder.set_color(png::ColorType::Rgb);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header()?;
+    writer.write_image_data(&pixels.rgb)?;
+    writer.finish()?;
+    Ok(png)
 }
 
 /// A point on the image and the line radius there (pixels)
@@ -436,27 +504,30 @@ impl PixelBounds {
     }
 }
 
-/// Paints strokes one by one, each in its color, over white
+/// Paints strokes one by one, each in its color, over white.
+/// The colors and the densities are kept as 4 bytes per pixel (the color as 3 u8 and the density as a u8).
+/// The mixing is done in f32 and the result is rounded back to 8 bit
 struct Raster {
     width: u32,
     height: u32,
-    /// Pixel colors (RGB 0 to 1)
-    rgb: Vec<[f32; 3]>,
-    /// Ink density per pixel (0 to 1) of the stroke being painted.
+    /// The pixel colors (RGB 0 to 255, rows from the top left)
+    rgb: Vec<u8>,
+    /// Ink density per pixel (0 to 255) of the stroke being painted.
     /// Takes the maximum before mixing into the color, so overlapping segments of the same stroke do not get darker
-    coverage: Vec<f32>,
-    /// Range of pixels touched by the stroke being painted (only this range is mixed into colors and reset to 0)
+    coverage: Vec<u8>,
+    /// The range of pixels touched by the stroke being painted (only this range is mixed into colors and reset to 0)
     touched: PixelBounds,
 }
 
 impl Raster {
-    fn new(width: u32, height: u32) -> Self {
+    /// `background` is the color of the pixels without strokes (RGB 0 to 255)
+    fn new(width: u32, height: u32, background: [u8; 3]) -> Self {
         let pixels = width as usize * height as usize;
         Self {
             width,
             height,
-            rgb: vec![[1.0; 3]; pixels],
-            coverage: vec![0.0; pixels],
+            rgb: background.repeat(pixels),
+            coverage: vec![0; pixels],
             touched: PixelBounds::EMPTY,
         }
     }
@@ -548,12 +619,14 @@ impl Raster {
                 if alpha <= 0.0 {
                     continue;
                 }
-                let cell = &mut self.rgb[py as usize * self.width as usize + px as usize];
+                let offset = py as usize * self.width as usize * 3 + px as usize * 3;
                 // The interpolated color is not divided by alpha; only the coverage is applied when blending
-                // (dst = dst * (1 - α * coverage) + color * coverage)
+                // (dst = dst * (1 - α * coverage) + color * coverage). It is done in f32, and
+                // the result is rounded back to 8 bit
                 let fade = 1.0 - alpha;
-                for (c, dst) in cell.iter_mut().enumerate() {
-                    *dst = *dst * fade + source[c] * coverage;
+                for (c, dst) in self.rgb[offset..offset + 3].iter_mut().enumerate() {
+                    let current = f32::from(*dst) / 255.0;
+                    *dst = ((current * fade + source[c] * coverage) * 255.0).round() as u8;
                 }
             }
         }
@@ -571,42 +644,40 @@ impl Raster {
                 let (t, distance) = closest_on_segment(center, a, b);
                 let radius = radius_a + (radius_b - radius_a) * t;
                 // Make the 1-pixel edge an intermediate density for smoothing
-                let coverage = (radius + 0.5 - distance).clamp(0.0, 1.0);
+                let coverage = ((radius + 0.5 - distance).clamp(0.0, 1.0) * 255.0).round() as u8;
                 let cell = &mut self.coverage[py as usize * self.width as usize + px as usize];
-                *cell = cell.max(coverage);
+                *cell = (*cell).max(coverage);
             }
         }
     }
 
-    /// Mixes color in by coverage density and resets coverage to 0
+    /// Mixes color in by coverage density and resets coverage to 0. It is done in f32,
+    /// and the result is rounded back to 8 bit
     fn blend(&mut self, color: [f32; 3]) {
         let touched = std::mem::replace(&mut self.touched, PixelBounds::EMPTY);
         for py in touched.ys {
             for px in touched.xs.clone() {
                 let i = py as usize * self.width as usize + px as usize;
                 let coverage = std::mem::take(&mut self.coverage[i]);
-                let pixel = &mut self.rgb[i];
-                for (channel, ink) in pixel.iter_mut().zip(color) {
-                    *channel += (ink - *channel) * coverage;
+                if coverage == 0 {
+                    continue;
+                }
+                let amount = f32::from(coverage) / 255.0;
+                for (channel, ink) in self.rgb[i * 3..i * 3 + 3].iter_mut().zip(color) {
+                    let current = f32::from(*channel) / 255.0;
+                    *channel = ((current + (ink - current) * amount) * 255.0).round() as u8;
                 }
             }
         }
     }
 
-    fn to_png(&self) -> Result<Vec<u8>, png::EncodingError> {
-        let bytes: Vec<u8> = self
-            .rgb
-            .iter()
-            .flat_map(|pixel| pixel.map(|channel| (channel * 255.0).round() as u8))
-            .collect();
-        let mut png = Vec::new();
-        let mut encoder = png::Encoder::new(&mut png, self.width, self.height);
-        encoder.set_color(png::ColorType::Rgb);
-        encoder.set_depth(png::BitDepth::Eight);
-        let mut writer = encoder.write_header()?;
-        writer.write_image_data(&bytes)?;
-        writer.finish()?;
-        Ok(png)
+    /// The pixels are already 8 bit, so they become `Pixels` as they are (no doubled area in between)
+    fn into_pixels(self) -> Pixels {
+        Pixels {
+            width: self.width,
+            height: self.height,
+            rgb: self.rgb,
+        }
     }
 }
 
@@ -734,45 +805,45 @@ mod tests {
         );
     }
 
-    /// Even an image larger than the paper keeps the captured area to the paper (the user cannot see outside the paper either)
+    /// Even an image larger than the sheet keeps the captured area to the sheet (the user cannot see outside the sheet either)
     #[test]
     fn clip_keeps_the_area_to_the_page() {
         let png = StoredImage::new(solid_png(2, 2, [0, 0, 255], 255));
-        // An image larger than the paper (0..40, 0..20), extending far beyond the right and bottom
+        // An image larger than the sheet (0..40, 0..20), extending far beyond the right and bottom
         let image = placement(20.0, 10.0, 4000.0, 3000.0);
         let page = Rect::from_edges(0.0, 0.0, 40.0, 20.0);
         let drawn = render(&[], &[page], Some((&image, &png)), Some(page))
             .unwrap()
             .unwrap();
-        assert_eq!(drawn.area, page, "写す範囲は紙のまま");
-        assert_eq!(drawn.scale, 1.0, "紙の外の画像で全体が縮まない");
+        assert_eq!(drawn.area, page, "写す範囲はシートのまま");
+        assert_eq!(drawn.scale, 1.0, "シート外の画像で全体が縮まない");
 
         let (width, _, pixels) = decode(&drawn.png);
         let at = |x: usize, y: usize| &pixels[(y * width as usize + x) * 3..][..3];
-        assert_eq!(at(30, 15), [0, 0, 255], "紙と重なる部分は青");
+        assert_eq!(at(30, 15), [0, 0, 255], "シートと重なる部分は青");
         assert_eq!(at(5, 5), [255, 255, 255], "画像より外は白");
     }
 
     #[test]
     fn image_outside_the_clip_leaves_the_area_and_the_pixels() {
         let png = StoredImage::new(solid_png(2, 2, [0, 0, 255], 255));
-        // An image placed apart to the right of the paper (not even touching the edge)
+        // An image placed apart to the right of the sheet (not even touching the edge)
         let image = placement(60.0, 0.0, 20.0, 20.0);
         let page = Rect::from_edges(0.0, 0.0, 40.0, 20.0);
         let drawn = render(&[], &[page], Some((&image, &png)), Some(page))
             .unwrap()
             .unwrap();
-        assert_eq!(drawn.area, page, "紙の外の画像は範囲を広げない");
+        assert_eq!(drawn.area, page, "シート外の画像は範囲を広げない");
         let (_, _, pixels) = decode(&drawn.png);
         assert!(
             pixels.chunks(3).all(|p| p == [255, 255, 255]),
-            "紙の外の画像は描かない"
+            "シート外の画像は描かない"
         );
     }
 
     #[test]
     fn without_clip_the_whole_image_is_in_the_area() {
-        // When no page is connected and the paper is unknown, the whole image area is captured
+        // When no page is connected and the sheet is unknown, the whole image area is captured
         let png = StoredImage::new(solid_png(2, 2, [0, 0, 255], 255));
         let image = placement(20.0, 0.0, 200.0, 20.0);
         let page = Rect::from_edges(0.0, 0.0, 40.0, 20.0);
@@ -1064,7 +1135,7 @@ mod tests {
             width: 100.0,
             height: 50.0,
         };
-        // Zoomed in, looking only at the bottom right of the paper
+        // Zoomed in, looking only at the bottom right of the sheet
         let viewport = Viewport {
             x: 50.0,
             y: 25.0,
@@ -1086,5 +1157,47 @@ mod tests {
         assert_eq!(width, MAX_IMAGE_SIDE as u32);
         assert!(height < width);
         assert!(image.scale < 1.0);
+    }
+
+    /// The background color of `render_area_on` shows in the pixels without strokes (`render_area` is white)
+    #[test]
+    fn the_background_color_fills_pixels_without_strokes() {
+        let area = Rect::from_edges(0.0, 0.0, 4.0, 2.0);
+        let colored = render_area_on([10, 20, 30], &[], None, area, 1.0);
+        assert!(
+            colored.rgb.chunks(3).all(|pixel| pixel == [10, 20, 30]),
+            "地の色が出る"
+        );
+        let white = render_area(&[], None, area, 1.0);
+        assert!(
+            white.rgb.chunks(3).all(|pixel| pixel == [255, 255, 255]),
+            "render_area は白地"
+        );
+    }
+
+    /// `render_area` draws with the given area and scale. It does not draw outside the area,
+    /// and at scale 2 the pixel count is twice the area
+    #[test]
+    fn render_area_uses_the_given_area_and_scale() {
+        let area = Rect::from_edges(0.0, 0.0, 10.0, 5.0);
+
+        // A stroke far to the right of the area is not drawn
+        let outside = stroke(&[(50.0, 2.5), (60.0, 2.5)]);
+        let pixels = render_area(&[outside], None, area, 2.0);
+        assert_eq!(
+            (pixels.width, pixels.height),
+            (20, 10),
+            "scale 2 で画素数は area の 2 倍"
+        );
+        assert!(
+            pixels.rgb.chunks(3).all(|p| p == [255, 255, 255]),
+            "area の外の筆跡は描かれない"
+        );
+
+        // A stroke inside the area is drawn at twice its position
+        let inside = stroke(&[(2.5, 2.5), (7.5, 2.5)]);
+        let pixels = render_area(&[inside], None, area, 2.0);
+        let at = |x: usize, y: usize| &pixels.rgb[(y * pixels.width as usize + x) * 3..][..3];
+        assert_eq!(at(10, 5), [0, 0, 0], "線の上は 2 倍の位置に黒");
     }
 }

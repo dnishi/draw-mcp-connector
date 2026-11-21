@@ -71,7 +71,7 @@ describe('pinchView', () => {
 describe('clampView', () => {
   const page = { width: 800, height: 600 };
 
-  it('見えている範囲を紙の中に収める', () => {
+  it('見えている範囲をシートの中に収める', () => {
     expect(clampView({ originX: -50, originY: 900, scale: 2 }, page)).toEqual({
       originX: 0,
       originY: 300,
@@ -79,7 +79,7 @@ describe('clampView', () => {
     });
   });
 
-  it('等倍では、紙全体を見る位置に戻る', () => {
+  it('等倍では、シート全体を見る位置に戻る', () => {
     expect(clampView({ originX: 30, originY: 40, scale: 1 }, page)).toEqual(
       INITIAL_VIEW,
     );

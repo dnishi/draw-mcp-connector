@@ -91,7 +91,7 @@ type ImageSettingsPopoverProps = ImageSettingsProps & {
 /**
  * The popover for the image size and delete, with the move tool (Move Image).
  * Shown beside the button when Move Image is selected, or near the clicked point when the image is clicked
- * (so it stays on screen even when the image fills the paper)
+ * (so it stays on screen even when the image fills the sheet)
  */
 export function ImageSettingsPopover({
   open,

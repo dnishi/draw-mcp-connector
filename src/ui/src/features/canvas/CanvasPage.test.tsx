@@ -8,8 +8,27 @@ import {
 } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { RefObject } from 'react';
 import { CanvasPage } from './CanvasPage';
-import { UNSUPPORTED_BROWSER_MESSAGE } from './StrokeRenderer';
+import {
+  UNSUPPORTED_BROWSER_MESSAGE,
+  type StrokeRenderer,
+} from './StrokeRenderer';
+
+// Renderer that pretends WebGPU is available for the export tests.
+// Without a renderer the menu's Export… can't be pressed, but jsdom has no navigator.gpu
+const { strokeRendererOverride } = vi.hoisted(() => ({
+  strokeRendererOverride: {
+    current: null as { renderer: StrokeRenderer; error: null } | null,
+  },
+}));
+vi.mock('./useStrokeRenderer', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./useStrokeRenderer')>();
+  return {
+    useStrokeRenderer: (canvasRef: RefObject<HTMLCanvasElement | null>) =>
+      strokeRendererOverride.current ?? actual.useStrokeRenderer(canvasRef),
+  };
+});
 
 describe('CanvasPage', () => {
   // jsdom has no navigator.gpu, so it behaves like a browser without WebGPU
@@ -21,36 +40,33 @@ describe('CanvasPage', () => {
     );
   });
 
-  it('右のサイドバーに、ツールと接続の状態をまとめる', () => {
+  it('サイドバーにツールを、メニューバーにメニュー・接続の状態・Send to AI を置く', async () => {
     render(<CanvasPage />);
     const sidebar = within(
       screen.getByRole('complementary', { name: 'Sidebar' }),
     );
+    const bar = within(screen.getByRole('banner', { name: 'Menu Bar' }));
 
     expect(
       sidebar.getByRole('toolbar', { name: 'Drawing Tools' }),
     ).toBeInTheDocument();
+    // The sidebar has only the tools. No connection status, Menu, or Send to AI
+    expect(sidebar.queryByRole('status')).toBeNull();
+    expect(sidebar.queryByRole('button', { name: 'Menu' })).toBeNull();
+    expect(sidebar.queryByRole('button', { name: 'Send to AI' })).toBeNull();
     // A page without connection info does not connect
-    expect(sidebar.getByRole('status')).toHaveTextContent('Not Connected');
-    // The sidebar does not overlap the canvas; it sits to the right of it
+    expect(bar.getByRole('status')).toHaveTextContent('Not Connected');
+    expect(bar.getByRole('button', { name: 'Menu' })).toBeInTheDocument();
+    expect(bar.getByRole('button', { name: 'Send to AI' })).toBeInTheDocument();
+    // Neither the sidebar nor the menu bar contains the canvas (they sit beside it, not on top of it)
     expect(sidebar.queryByLabelText('Canvas')).toBeNull();
+    expect(bar.queryByLabelText('Canvas')).toBeNull();
   });
 
-  it('接続していないとき、サイドバーに Send to AI があり、押せない', () => {
+  it('接続していないとき、メニューバーの Send to AI は押せない', () => {
     render(<CanvasPage />);
-    const sidebar = within(
-      screen.getByRole('complementary', { name: 'Sidebar' }),
-    );
 
-    expect(sidebar.getByRole('button', { name: 'Send to AI' })).toBeDisabled();
-  });
-
-  it('接続の状態はサイドバーの一番上(ツールより前)に置く', () => {
-    render(<CanvasPage />);
-    const sidebar = screen.getByRole('complementary', { name: 'Sidebar' });
-    const status = within(sidebar).getByRole('status');
-
-    expect(sidebar.firstElementChild).toBe(status);
+    expect(screen.getByRole('button', { name: 'Send to AI' })).toBeDisabled();
   });
 
   it('指で書くは初めはオンで、ペンを使うと自動でオフになる', () => {
@@ -122,7 +138,7 @@ describe('CanvasPage', () => {
     });
 
     describe('画像の大きさと削除の吹き出し', () => {
-      // Without a paper size the image is placed as 0×0 and clicks never hit it, so
+      // Without a sheet size the image is placed as 0×0 and clicks never hit it, so
       // fake the canvas size (800×600) and the notice of its change
       beforeEach(() => {
         vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(
@@ -234,7 +250,7 @@ describe('CanvasPage', () => {
         await clickCanvas(5, 5);
         await waitFor(() => expect(popup()).not.toBeInTheDocument());
 
-        // A 400×200 image is placed in the middle of the 800×600 paper (200 to 600, 200 to 400)
+        // A 400×200 image is placed in the middle of the 800×600 sheet (200 to 600, 200 to 400)
         await clickCanvas(400, 300);
         expect(
           await screen.findByRole('dialog', { name: 'Image Settings' }),
@@ -345,8 +361,8 @@ describe('CanvasPage', () => {
     });
   });
 
-  describe('紙の切り替え', () => {
-    it('キャンバスの右上に切り替えが出て、「New Sheet」で紙が増える', async () => {
+  describe('シートの切り替え', () => {
+    it('キャンバスの右上に切り替えが出て、「New Sheet」でシートが増える', async () => {
       render(<CanvasPage />);
 
       expect(
@@ -358,6 +374,35 @@ describe('CanvasPage', () => {
       expect(
         screen.getByRole('button', { name: 'Sheet 2 / 2' }),
       ).toBeInTheDocument();
+    });
+  });
+
+  describe('書き出し(Export…)', () => {
+    // Fake a renderer (pretend WebGPU is available). The drawing itself cannot be tested (it only draws)
+    const fakeRenderer = { resize: vi.fn(), draw: vi.fn(), destroy: vi.fn() };
+    beforeEach(() => {
+      strokeRendererOverride.current = {
+        renderer: fakeRenderer as unknown as StrokeRenderer,
+        error: null,
+      };
+    });
+    afterEach(() => {
+      strokeRendererOverride.current = null;
+    });
+
+    it('メニューの Export… でパネルが開き、Cancel で閉じる', async () => {
+      render(<CanvasPage />);
+
+      await userEvent.click(screen.getByRole('button', { name: 'Menu' }));
+      await screen.findByRole('menu');
+      await userEvent.click(screen.getByRole('menuitem', { name: 'Export…' }));
+
+      expect(
+        await screen.findByRole('dialog', { name: 'Export' }),
+      ).toBeInTheDocument();
+
+      await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+      expect(screen.queryByRole('dialog', { name: 'Export' })).toBeNull();
     });
   });
 });

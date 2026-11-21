@@ -192,7 +192,7 @@ struct CanvasSummary {
     /// Number of sheets
     #[serde(rename = "sheetCount")]
     sheet_count: usize,
-    /// For each connected canvas page, the paper size (paper starts at (0, 0)) and the visible area
+    /// For each connected canvas page, the sheet size (the sheet starts at (0, 0)) and the visible area
     canvases: Vec<CanvasView>,
     /// No image is returned when there is nothing to draw
     image: Option<ImageInfo>,
@@ -234,7 +234,7 @@ fn render_image(
     sheet: &Sheet,
     data: Option<&StoredImage>,
 ) -> Result<Option<(ImageInfo, Vec<u8>)>, ErrorData> {
-    // The whole paper and visible area of connected pages are captured even without strokes
+    // The whole sheet and visible area of connected pages are captured even without strokes
     let regions: Vec<Rect> = snapshot
         .views
         .iter()
@@ -245,9 +245,9 @@ fn render_image(
                 .chain([Rect::from(view.viewport)])
         })
         .collect();
-    // The image adds to the captured area only where it overlaps the paper of connected pages
-    // (outside the paper the user cannot see it either; adding it widens the area and shrinks the handwriting too).
-    // If no page is connected or no paper size has arrived, use None and add the whole image area
+    // The image adds to the captured area only where it overlaps the sheet of connected pages
+    // (outside the sheet the user cannot see it either; adding it widens the area and shrinks the handwriting too).
+    // If no page is connected or no sheet size has arrived, use None and add the whole image area
     let clip = snapshot
         .views
         .iter()
@@ -267,7 +267,7 @@ fn render_image(
             revision: snapshot.revision,
             sheet: snapshot
                 .sheet_number(&sheet.id)
-                .expect("写す紙はスナップショットの中にある"),
+                .expect("写すシートはスナップショットの中にある"),
             area: image.area,
             scale: image.scale,
         };
@@ -312,10 +312,10 @@ fn canvas_summary(
         revision: snapshot.revision,
         sheet: snapshot
             .sheet_number(&sheet.id)
-            .expect("読んだ紙はスナップショットの中にある"),
+            .expect("読んだシートはスナップショットの中にある"),
         current_sheet: snapshot
             .sheet_number(&snapshot.current)
-            .expect("今の紙は必ず存在する"),
+            .expect("今のシートは必ず存在する"),
         sheet_count: snapshot.sheets.len(),
         canvases: snapshot.views.clone(),
         image,
@@ -356,7 +356,7 @@ fn changes_summary(
                 revision: *revision,
                 current_sheet: current
                     .sheet_number(&current.current)
-                    .expect("今の紙は必ず存在する"),
+                    .expect("今のシートは必ず存在する"),
                 sheet_count: current.sheets.len(),
                 canvases: current.views.clone(),
                 ops: ops.iter().map(|op| summarize(op, current)).collect(),
@@ -618,7 +618,7 @@ mod tests {
         );
     }
 
-    /// With two devices of different sizes connected, shows the area containing both papers and returns both views
+    /// With two devices of different sizes connected, shows the area containing both sheets and returns both views
     #[test]
     fn every_connected_canvas_is_described_and_imaged() {
         let mut both = snapshot(Vec::new(), None);
@@ -895,10 +895,10 @@ mod tests {
         assert_eq!(result.content.len(), 2, "合成した PNG も返す");
     }
 
-    /// Even if the image is placed larger than the paper, the captured area stays the paper (the handwriting does not shrink)
+    /// Even if the image is placed larger than the sheet, the captured area stays the sheet (the handwriting does not shrink)
     #[test]
     fn image_beyond_the_page_does_not_grow_the_rendered_area() {
-        // An image that extends far past the right and bottom of the paper (30×20)
+        // An image that extends far past the right and bottom of the sheet (30×20)
         let snapped = snapshot(
             vec![stroke("a")],
             Some(placement("img", 10.0, 10.0, 4000.0, 3000.0)),
@@ -922,7 +922,7 @@ mod tests {
         );
     }
 
-    /// When no page is connected the paper is unknown, so the whole image area is captured
+    /// When no page is connected the sheet is unknown, so the whole image area is captured
     #[test]
     fn image_area_is_whole_without_any_page() {
         let mut snapped = snapshot(

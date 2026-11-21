@@ -23,7 +23,7 @@ interface Options {
   info: ConnectionInfo | null;
   /** Area of the canvas currently visible on this page (sent to the PC whenever it changes) */
   viewport: Viewport;
-  /** Size of the canvas (paper) (sent to the PC whenever it changes) */
+  /** Size of the canvas (sheet) (sent to the PC whenever it changes) */
   page: PageSize;
   /** Operations made on this page that the PC has not acked yet (sent whenever they change) */
   pending: readonly PendingOp[];
@@ -75,7 +75,7 @@ export function useBridgeSync({
   const sentSeqRef = useRef(0);
   // The latest pending. flush reads it
   const pendingRef = useRef(pending);
-  // To send the range and paper size at connection time with hello. Does not reconnect when they change
+  // To send the range and sheet size at connection time with hello. Does not reconnect when they change
   const viewRef = useRef({ viewport, page });
   useEffect(() => {
     viewRef.current = { viewport, page };
@@ -261,7 +261,7 @@ export function useBridgeSync({
         }
       : null;
 
-  // Report when the visible area (screen size, zoom, pan) or the paper size changes.
+  // Report when the visible area (screen size, zoom, pan) or the sheet size changes.
   // It does not change during a pinch, only once when it ends
   useEffect(() => {
     if (status !== 'connected') {
