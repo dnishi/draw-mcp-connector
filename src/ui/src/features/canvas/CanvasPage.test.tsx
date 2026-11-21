@@ -455,5 +455,71 @@ describe('CanvasPage', () => {
       await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));
       expect(screen.queryByRole('dialog', { name: 'Export' })).toBeNull();
     });
+
+    describe('範囲の選び方', () => {
+      // The sheet size is needed, so make the canvas look 800×600 (as in the image popover tests)
+      beforeEach(() => {
+        vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(
+          800,
+        );
+        vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(
+          600,
+        );
+        vi.stubGlobal(
+          'ResizeObserver',
+          class {
+            #callback: (entries: unknown[]) => void;
+            constructor(callback: (entries: unknown[]) => void) {
+              this.#callback = callback;
+            }
+            observe() {
+              this.#callback([]);
+            }
+            unobserve() {}
+            disconnect() {}
+          },
+        );
+      });
+      afterEach(() => {
+        vi.restoreAllMocks();
+        vi.unstubAllGlobals();
+      });
+
+      it('範囲の重ねを出している間はキャンバスを縮めて余白を出し、All Sheets と閉じるときは等倍に戻す', async () => {
+        render(<CanvasPage />);
+        const scaled = () =>
+          screen.getByLabelText('Canvas').style.transform.includes('scale(');
+        expect(scaled()).toBe(false);
+
+        await userEvent.click(screen.getByRole('button', { name: 'Menu' }));
+        await screen.findByRole('menu');
+        await userEvent.click(
+          screen.getByRole('menuitem', { name: 'Export…' }),
+        );
+        expect(
+          await screen.findByRole('dialog', { name: 'Export' }),
+        ).toBeInTheDocument();
+        // The default (PNG) shows the area overlay, so the sheet is shrunk
+        expect(scaled()).toBe(true);
+
+        // PDF All Sheets (no area overlay) is 1:1
+        await userEvent.click(screen.getByRole('button', { name: 'PDF' }));
+        await userEvent.click(
+          screen.getByRole('button', { name: 'All Sheets' }),
+        );
+        expect(scaled()).toBe(false);
+
+        // Switching back to Current Sheet shrinks it again
+        await userEvent.click(
+          screen.getByRole('button', { name: 'Current Sheet' }),
+        );
+        expect(scaled()).toBe(true);
+
+        // Closing with Cancel returns to 1:1
+        await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+        expect(screen.queryByRole('dialog', { name: 'Export' })).toBeNull();
+        expect(scaled()).toBe(false);
+      });
+    });
   });
 });

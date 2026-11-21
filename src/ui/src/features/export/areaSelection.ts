@@ -7,6 +7,12 @@ import type { Area } from './exportFile';
  */
 export const HANDLE_SIZE = 24;
 
+/**
+ * The margin around the sheet while choosing the area. The same as the handle size `HANDLE_SIZE`,
+ * so the handles on the edges fit in the margin
+ */
+export const EXPORT_MARGIN = 24;
+
 /** A corner of the area */
 export type Corner = 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right';
 
@@ -21,6 +27,33 @@ export const CORNER_CURSOR: Record<Corner, string> = {
 /** The sheet size (CSS pixels) */
 export type Page = { width: number; height: number };
 
+/**
+ * The scale and position of the sheet while choosing the area. It shrinks the sheet without
+ * changing its aspect ratio and centers it in the canvas area, leaving a margin on all four
+ * sides. The margin is `EXPORT_MARGIN` in the direction that shrinks more, and at least that in
+ * the other (display only; the area coordinates and the exported content do not change)
+ */
+export function areaSelectionView(page: Page): {
+  scale: number;
+  x: number;
+  y: number;
+} {
+  // When the sheet's width or height is no more than two margins (including while it is 0×0),
+  // there is no room for a margin, so do not shrink
+  if (page.width <= 2 * EXPORT_MARGIN || page.height <= 2 * EXPORT_MARGIN) {
+    return { scale: 1, x: 0, y: 0 };
+  }
+  const scale = Math.min(
+    (page.width - 2 * EXPORT_MARGIN) / page.width,
+    (page.height - 2 * EXPORT_MARGIN) / page.height,
+  );
+  return {
+    scale,
+    x: (page.width - page.width * scale) / 2,
+    y: (page.height - page.height * scale) / 2,
+  };
+}
+
 /** What is under the pressed position (canvas coordinates) */
 export type AreaHit =
   { kind: 'resize'; corner: Corner } | { kind: 'move' } | { kind: 'new' };
@@ -32,13 +65,15 @@ export type AreaDrag =
   | { kind: 'new'; start: Point };
 
 /**
- * What is under the pressed position. The view is 1:1, so screen coordinates = canvas coordinates.
- * It is checked in the same order as hit in the bridge's area_select.rs (corners → inside the area → otherwise)
+ * What is under the pressed position (canvas coordinates). Given the view scale, the size that
+ * hits a handle matches `HANDLE_SIZE` in screen CSS pixels, which is `HANDLE_SIZE / scale` in
+ * canvas coordinates. It is checked in the same order as hit in the bridge's area_select.rs
+ * (corners → inside the area → otherwise)
  */
-export function hitArea(point: Point, area: Area): AreaHit {
+export function hitArea(point: Point, area: Area, scale = 1): AreaHit {
   const right = area.x + area.width;
   const bottom = area.y + area.height;
-  const reach = HANDLE_SIZE / 2;
+  const reach = HANDLE_SIZE / 2 / scale;
   const corners: Array<[Corner, number, number]> = [
     ['top-left', area.x, area.y],
     ['top-right', right, area.y],
@@ -61,9 +96,14 @@ export function hitArea(point: Point, area: Area): AreaHit {
   return { kind: 'new' };
 }
 
-/** The drag to start from the pressed position (canvas coordinates) */
-export function beginDrag(point: Point, area: Area, page: Page): AreaDrag {
-  const hit = hitArea(point, area);
+/** The drag to start from the pressed position (canvas coordinates; the view scale is as in hitArea) */
+export function beginDrag(
+  point: Point,
+  area: Area,
+  page: Page,
+  scale = 1,
+): AreaDrag {
+  const hit = hitArea(point, area, scale);
   switch (hit.kind) {
     case 'resize':
       return {

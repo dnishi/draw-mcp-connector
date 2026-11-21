@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { beginDrag, draggedArea, hitArea } from './areaSelection';
+import {
+  areaSelectionView,
+  beginDrag,
+  draggedArea,
+  hitArea,
+} from './areaSelection';
 
 describe('hitArea', () => {
   const area = { x: 100, y: 80, width: 200, height: 140 };
@@ -48,6 +53,56 @@ describe('hitArea', () => {
   it('範囲の外なら新しく描く', () => {
     expect(hitArea({ x: 5, y: 5 }, area)).toEqual({ kind: 'new' });
     expect(hitArea({ x: 390, y: 290 }, area)).toEqual({ kind: 'new' });
+  });
+
+  it('scale を渡すと、ハンドルに当たる大きさはシート座標で HANDLE_SIZE/scale になる', () => {
+    const scale = 0.8;
+    const reach = 12 / scale; // HANDLE_SIZE / 2 / scale
+    // Inside the boundary (reach from the corner) hits
+    expect(hitArea({ x: 100 + reach, y: 80 + reach }, area, scale)).toEqual({
+      kind: 'resize',
+      corner: 'top-left',
+    });
+    expect(hitArea({ x: 100 - reach, y: 80 - reach }, area, scale)).toEqual({
+      kind: 'resize',
+      corner: 'top-left',
+    });
+    // Outside the boundary is not a corner
+    expect(
+      hitArea({ x: 100 - reach - 0.1, y: 80 - reach - 0.1 }, area, scale),
+    ).toEqual({ kind: 'new' });
+  });
+});
+
+describe('areaSelectionView', () => {
+  it('横長のシートは上下の余白が 24px(左右はそれ以上)になるよう縮めて、中央に置く', () => {
+    // scale = (300 - 48) / 300
+    expect(areaSelectionView({ width: 400, height: 300 })).toEqual({
+      scale: (300 - 48) / 300,
+      x: 32,
+      y: 24,
+    });
+  });
+
+  it('縦長のシートは左右の余白が 24px になる', () => {
+    expect(areaSelectionView({ width: 300, height: 400 })).toEqual({
+      scale: (300 - 48) / 300,
+      x: 24,
+      y: 32,
+    });
+  });
+
+  it('幅か高さが 48 以下(0×0 を含む)なら縮めない', () => {
+    expect(areaSelectionView({ width: 48, height: 300 })).toEqual({
+      scale: 1,
+      x: 0,
+      y: 0,
+    });
+    expect(areaSelectionView({ width: 0, height: 0 })).toEqual({
+      scale: 1,
+      x: 0,
+      y: 0,
+    });
   });
 });
 

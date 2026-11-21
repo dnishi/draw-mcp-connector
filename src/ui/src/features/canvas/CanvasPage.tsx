@@ -3,6 +3,7 @@ import type { ConnectionInfo } from '../sync/connectionInfo';
 import { useBridgeSync } from '../sync/useBridgeSync';
 import { MenuBar } from '../menu/MenuBar';
 import { AreaSelectionOverlay } from '../export/AreaSelectionOverlay';
+import { areaSelectionView } from '../export/areaSelection';
 import { ExportPanel } from '../export/ExportPanel';
 import type { Area, ExportFormat, ExportTarget } from '../export/exportFile';
 import { CameraDialog } from './CameraDialog';
@@ -137,7 +138,11 @@ export function CanvasPage({ connectionInfo = null }: CanvasPageProps) {
     }
   };
 
-  /** Opens the export panel: resets the view to 1:1 and the area to the whole sheet. Also closes the image popover */
+  /**
+   * Opens the export panel: resets the view to 1:1 and the area to the whole sheet. While the area
+   * overlay is shown, the sheet is shrunk with a margin around it (areaSelecting below). Also
+   * closes the image popover
+   */
   const openExport = () => {
     resetView();
     setExportArea({ x: 0, y: 0, width: page.width, height: page.height });
@@ -237,6 +242,10 @@ export function CanvasPage({ connectionInfo = null }: CanvasPageProps) {
         DOMRect.fromRect({ x, y, width: 0, height: 0 }),
     };
   }, [imageSettingsAt]);
+  // While the area overlay is shown (PNG, or PDF Current Sheet), show the sheet shrunk with a margin around it
+  const areaSelecting =
+    exportOpen && (exportFormat === 'png' || exportTarget === 'current');
+  const areaView = areaSelecting ? areaSelectionView(page) : null;
   const importImageFile = (files: Iterable<File>) => {
     const file = Array.from(files).find((file) =>
       file.type.startsWith('image/'),
@@ -263,7 +272,9 @@ export function CanvasPage({ connectionInfo = null }: CanvasPageProps) {
 
       <main className="flex min-h-0 flex-1">
         <div
-          className="relative min-w-0 flex-1"
+          data-area-selecting={areaSelecting || undefined}
+          // While choosing the area, make the margin around the shrunk sheet darker than the dimmed sheet (white under the overlay's shadow)
+          className="relative min-w-0 flex-1 data-area-selecting:bg-neutral-400"
           // PC browsers: dragging and dropping a file also imports it
           onDragOver={(event) => event.preventDefault()}
           onDrop={(event) => {
@@ -278,6 +289,16 @@ export function CanvasPage({ connectionInfo = null }: CanvasPageProps) {
             data-tool={tool}
             // Mouse on a PC: a crosshair for the pen; for the eraser, hide the OS pointer and show the eraser circle (the div below)
             className="absolute inset-0 size-full touch-none bg-white data-[tool=eraser]:cursor-none data-[tool=move]:cursor-move data-[tool=pen]:cursor-crosshair"
+            // While choosing the area, show the sheet shrunk and centered with a margin (transform only affects
+            // the display, so the layout size = the sheet size does not change)
+            style={
+              areaView
+                ? {
+                    transform: `translate(${areaView.x}px, ${areaView.y}px) scale(${areaView.scale})`,
+                    transformOrigin: '0 0',
+                  }
+                : undefined
+            }
             {...pointerHandlers}
           />
           {/* Eraser circle (with a mouse while the eraser is selected, with a pen while tracing to erase). useCanvasDrawing writes its position and size directly */}
@@ -325,16 +346,17 @@ export function CanvasPage({ connectionInfo = null }: CanvasPageProps) {
           {/* While the export panel is open, stop input from reaching the canvas.
             For PNG and the current sheet, an area overlay (which receives the input itself);
             for all sheets, only a transparent div that shows no area */}
-          {exportOpen &&
-            (exportFormat === 'png' || exportTarget === 'current' ? (
-              <AreaSelectionOverlay
-                page={page}
-                area={exportArea}
-                onAreaChange={setExportArea}
-              />
-            ) : (
+          {areaSelecting ? (
+            <AreaSelectionOverlay
+              page={page}
+              area={exportArea}
+              onAreaChange={setExportArea}
+            />
+          ) : (
+            exportOpen && (
               <div className="absolute inset-0 touch-none" aria-hidden />
-            ))}
+            )
+          )}
           {exportOpen && (
             <ExportPanel
               page={page}

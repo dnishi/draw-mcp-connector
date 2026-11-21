@@ -1,6 +1,7 @@
 import { useRef, useState, type PointerEvent } from 'react';
 import {
   CORNER_CURSOR,
+  areaSelectionView,
   beginDrag,
   draggedArea,
   hitArea,
@@ -42,10 +43,11 @@ function hitCursor(hit: AreaHit): string {
 }
 
 /**
- * The area selection overlay. Placed over the canvas with `absolute inset-0` and shown
- * only while the export panel is open. It takes the canvas input itself, so writing,
- * erasing, and pinching stop here. The view is 1:1 (restored when the panel opens),
- * so screen coordinates = canvas coordinates (the top left of this div is the origin)
+ * The area selection overlay. Placed over the canvas with `absolute inset-0` (the whole canvas
+ * area, including the margin) and shown only while the export panel is open. It takes the canvas
+ * input itself, so writing, erasing, and pinching stop here. While it is shown, the sheet is
+ * shrunk and centered by `areaSelectionView` (the margin is only dimmed), so a screen point is
+ * turned into canvas coordinates from the top left of this div with that scale and position
  */
 export function AreaSelectionOverlay({
   page,
@@ -57,6 +59,8 @@ export function AreaSelectionOverlay({
   /** The pointer in progress (a second one at the same time is ignored) */
   const activePointerRef = useRef<number | null>(null);
   const [cursor, setCursor] = useState('crosshair');
+  /** The scale and position (from the top left of the canvas area) of the shrunk sheet while this is shown */
+  const view = areaSelectionView(page);
 
   /** A screen point to canvas coordinates */
   const toPoint = (event: PointerEvent<HTMLDivElement>) => {
@@ -64,7 +68,10 @@ export function AreaSelectionOverlay({
     if (!bounds) {
       return null;
     }
-    return { x: event.clientX - bounds.left, y: event.clientY - bounds.top };
+    return {
+      x: (event.clientX - bounds.left - view.x) / view.scale,
+      y: (event.clientY - bounds.top - view.y) / view.scale,
+    };
   };
 
   const onPointerDown = (event: PointerEvent<HTMLDivElement>) => {
@@ -76,7 +83,7 @@ export function AreaSelectionOverlay({
       return;
     }
     activePointerRef.current = event.pointerId;
-    const drag = beginDrag(point, area, page);
+    const drag = beginDrag(point, area, page, view.scale);
     dragRef.current = drag;
     setCursor(dragCursor(drag));
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -95,7 +102,7 @@ export function AreaSelectionOverlay({
     if (drag && event.pointerId === activePointerRef.current) {
       onAreaChange(draggedArea(drag, point, page));
     } else if (!drag) {
-      setCursor(hitCursor(hitArea(point, area)));
+      setCursor(hitCursor(hitArea(point, area, view.scale)));
     }
   };
 
@@ -118,14 +125,14 @@ export function AreaSelectionOverlay({
       onPointerUp={endPointer}
       onPointerCancel={endPointer}
     >
-      {/* Darken outside the area with 40% black (the shadow of the area frame). The edge is 2px blue */}
+      {/* Darken outside the area with 40% black (the shadow of the area frame; the margin is darkened too). The edge is 2px blue */}
       <div
         className="absolute border-2 border-sky-500"
         style={{
-          left: area.x,
-          top: area.y,
-          width: area.width,
-          height: area.height,
+          left: view.x + area.x * view.scale,
+          top: view.y + area.y * view.scale,
+          width: area.width * view.scale,
+          height: area.height * view.scale,
           boxShadow: '0 0 0 100vmax rgba(0, 0, 0, 0.4)',
         }}
       >
