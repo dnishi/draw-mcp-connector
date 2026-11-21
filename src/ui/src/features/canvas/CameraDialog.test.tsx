@@ -11,14 +11,14 @@ import { CameraDialog } from './CameraDialog';
 
 const videoInput = () => ({ kind: 'videoinput' }) as MediaDeviceInfo;
 
-/** A fake camera track */
-function createFakeTrack() {
+/** A mock camera track */
+function createMockTrack() {
   return { stop: vi.fn() };
 }
 
-/** A fake MediaStream (getTracks returns the same tracks every time) */
-function createFakeStream() {
-  const tracks = [createFakeTrack(), createFakeTrack()];
+/** A mock MediaStream (getTracks returns the same tracks every time) */
+function createMockStream() {
+  const tracks = [createMockTrack(), createMockTrack()];
   return {
     stream: { getTracks: () => tracks } as unknown as MediaStream,
     tracks,
@@ -26,7 +26,7 @@ function createFakeStream() {
 }
 
 /**
- * Replaces navigator.mediaDevices with a fake and decides how getUserMedia behaves.
+ * Replaces navigator.mediaDevices with a mock and decides how getUserMedia behaves.
  * The returned mediaDevices is used to check the getUserMedia calls
  */
 function installMediaDevices(
@@ -71,7 +71,7 @@ describe('CameraDialog', () => {
   });
 
   it('開くと getUserMedia を呼び、映像の要素にストリームを入れる', async () => {
-    const { stream } = createFakeStream();
+    const { stream } = createMockStream();
     const mediaDevices = installMediaDevices([videoInput()], () =>
       Promise.resolve(stream),
     );
@@ -89,7 +89,7 @@ describe('CameraDialog', () => {
   });
 
   it('Cancel を押すと onClose が呼ばれる', async () => {
-    const { stream } = createFakeStream();
+    const { stream } = createMockStream();
     installMediaDevices([videoInput()], () => Promise.resolve(stream));
     const onClose = vi.fn();
     render(<CameraDialog open onClose={onClose} onCapture={vi.fn()} />);
@@ -101,7 +101,7 @@ describe('CameraDialog', () => {
   });
 
   it('閉じたら(open を false にして再描画したら)トラックが止まる', async () => {
-    const { stream, tracks } = createFakeStream();
+    const { stream, tracks } = createMockStream();
     installMediaDevices([videoInput()], () => Promise.resolve(stream));
     const { rerender } = render(
       <CameraDialog open onClose={vi.fn()} onCapture={vi.fn()} />,
@@ -118,7 +118,7 @@ describe('CameraDialog', () => {
   });
 
   it('loadeddata の前は Capture を押せない。映像が動いたら押せて、onCapture に映像の要素が渡る。onCapture の Promise が終わるまで押せない', async () => {
-    const { stream } = createFakeStream();
+    const { stream } = createMockStream();
     installMediaDevices([videoInput()], () => Promise.resolve(stream));
     // A Promise that never settles stands for "importing"
     const onCapture = vi.fn(() => new Promise<void>(() => {}));
@@ -147,8 +147,8 @@ describe('CameraDialog', () => {
   });
 
   it('videoinput が 2 台なら Switch Camera が出て、押すと前のトラックが止まり、user 向きのカメラが開く', async () => {
-    const first = createFakeStream();
-    const second = createFakeStream();
+    const first = createMockStream();
+    const second = createMockStream();
     let call = 0;
     const mediaDevices = installMediaDevices(
       [videoInput(), videoInput()],
@@ -182,7 +182,7 @@ describe('CameraDialog', () => {
   });
 
   it('videoinput が 1 台なら Switch Camera は出ない', async () => {
-    const { stream } = createFakeStream();
+    const { stream } = createMockStream();
     installMediaDevices([videoInput()], () => Promise.resolve(stream));
     render(<CameraDialog open onClose={vi.fn()} onCapture={vi.fn()} />);
     await waitFor(() => expect(video().srcObject).toBe(stream));
@@ -193,7 +193,7 @@ describe('CameraDialog', () => {
   });
 
   it('開いている間に閉じたあと、遅れて getUserMedia が解決しても、そのトラックは止まる', async () => {
-    const { stream, tracks } = createFakeStream();
+    const { stream, tracks } = createMockStream();
     let resolveStream: (stream: MediaStream) => void = () => {};
     installMediaDevices(
       [videoInput()],

@@ -7,7 +7,7 @@ import {
   useCameraAvailable,
 } from './camera';
 
-/** jsdom has no navigator.mediaDevices, so the tests put a fake one */
+/** jsdom has no navigator.mediaDevices, so the tests put a mock */
 function installMediaDevices(value: unknown) {
   Object.defineProperty(navigator, 'mediaDevices', {
     configurable: true,
@@ -22,22 +22,22 @@ function removeMediaDevices() {
   });
 }
 
-/** A fake camera track */
-function createFakeTrack() {
+/** A mock camera track */
+function createMockTrack() {
   return { stop: vi.fn() };
 }
 
-/** A fake MediaStream (getTracks returns the same tracks every time) */
-function createFakeStream() {
-  const tracks = [createFakeTrack(), createFakeTrack()];
+/** A mock MediaStream (getTracks returns the same tracks every time) */
+function createMockStream() {
+  const tracks = [createMockTrack(), createMockTrack()];
   return {
     stream: { getTracks: () => tracks } as unknown as MediaStream,
     tracks,
   };
 }
 
-/** A fake MediaDevices that can fire devicechange (devices are read on every call) */
-function createFakeMediaDevices(devices: MediaDeviceInfo[]) {
+/** A mock MediaDevices that can fire devicechange (devices are read on every call) */
+function createMockMediaDevices(devices: MediaDeviceInfo[]) {
   const listeners = new Set<EventListener>();
   const mediaDevices = {
     enumerateDevices: vi.fn(async () => [...devices]),
@@ -78,7 +78,7 @@ describe('useCameraAvailable', () => {
   });
 
   it('videoinput があるなら true', async () => {
-    installMediaDevices(createFakeMediaDevices([videoInput()]).mediaDevices);
+    installMediaDevices(createMockMediaDevices([videoInput()]).mediaDevices);
 
     const { result } = renderHook(() => useCameraAvailable());
 
@@ -87,7 +87,7 @@ describe('useCameraAvailable', () => {
 
   it('audioinput だけなら false', async () => {
     installMediaDevices(
-      createFakeMediaDevices([{ kind: 'audioinput' } as MediaDeviceInfo])
+      createMockMediaDevices([{ kind: 'audioinput' } as MediaDeviceInfo])
         .mediaDevices,
     );
 
@@ -98,7 +98,7 @@ describe('useCameraAvailable', () => {
   });
 
   it('enumerateDevices が reject したら false', async () => {
-    const mediaDevices = createFakeMediaDevices([videoInput()]).mediaDevices;
+    const mediaDevices = createMockMediaDevices([videoInput()]).mediaDevices;
     vi.mocked(mediaDevices.enumerateDevices).mockRejectedValue(
       new Error('denied'),
     );
@@ -112,7 +112,7 @@ describe('useCameraAvailable', () => {
 
   it('devicechange で数え直して変わる', async () => {
     const devices = [videoInput()];
-    const { mediaDevices, fireDeviceChange } = createFakeMediaDevices(devices);
+    const { mediaDevices, fireDeviceChange } = createMockMediaDevices(devices);
     installMediaDevices(mediaDevices);
 
     const { result } = renderHook(() => useCameraAvailable());
@@ -134,7 +134,7 @@ describe('openCamera', () => {
   });
 
   it('getUserMedia に、制約(audio: false、facingMode と幅・高さは ideal)を渡す', async () => {
-    const { stream } = createFakeStream();
+    const { stream } = createMockStream();
     const getUserMedia = vi.fn(async () => stream);
     installMediaDevices({ getUserMedia });
 
@@ -160,7 +160,7 @@ describe('openCamera', () => {
 
 describe('stopCamera', () => {
   it('すべてのトラックの stop を呼ぶ', () => {
-    const { stream, tracks } = createFakeStream();
+    const { stream, tracks } = createMockStream();
 
     stopCamera(stream);
 

@@ -15,7 +15,7 @@ import {
   type StrokeRenderer,
 } from './StrokeRenderer';
 
-// Renderer that pretends WebGPU is available for the export tests.
+// Override slot for the export tests to put a mock of the renderer used when WebGPU is available.
 // Without a renderer the menu's Export can't be pressed, but jsdom has no navigator.gpu
 const { strokeRendererOverride } = vi.hoisted(() => ({
   strokeRendererOverride: {
@@ -87,7 +87,7 @@ describe('CanvasPage', () => {
   });
 
   describe('画像の取り込み', () => {
-    // jsdom has no createImageBitmap or canvas 2D, so fake them as tools that work
+    // jsdom has no createImageBitmap or canvas 2D, so put mocks that work
     // up to re-encoding into PNG (still no WebGPU, so drawing cannot be tested)
     beforeEach(() => {
       vi.stubGlobal(
@@ -139,7 +139,7 @@ describe('CanvasPage', () => {
 
     describe('画像の大きさと削除の吹き出し', () => {
       // Without a sheet size the image is placed as 0×0 and clicks never hit it, so
-      // fake the canvas size (800×600) and the notice of its change
+      // mock the canvas size (800×600) and the notice of its change
       beforeEach(() => {
         vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(
           800,
@@ -329,7 +329,7 @@ describe('CanvasPage', () => {
   });
 
   describe('カメラで撮る(Take Photo)', () => {
-    // jsdom has no navigator.mediaDevices, so put a fake one with a videoinput
+    // jsdom has no navigator.mediaDevices, so put a mock with a videoinput
     function installMediaDevices(videoInputs: number) {
       Object.defineProperty(navigator, 'mediaDevices', {
         configurable: true,
@@ -352,7 +352,7 @@ describe('CanvasPage', () => {
       });
     });
 
-    it('videoinput がある偽の mediaDevices を置くと「Take Photo」が出る', async () => {
+    it('videoinput がある mediaDevices のモックを置くと「Take Photo」が出る', async () => {
       installMediaDevices(1);
       render(<CanvasPage />);
 
@@ -429,11 +429,11 @@ describe('CanvasPage', () => {
   });
 
   describe('書き出し(Export)', () => {
-    // Fake a renderer (pretend WebGPU is available). The drawing itself cannot be tested (it only draws)
-    const fakeRenderer = { resize: vi.fn(), draw: vi.fn(), destroy: vi.fn() };
+    // Put a mock of the renderer used when WebGPU is available. The drawing itself cannot be tested (it only draws)
+    const mockRenderer = { resize: vi.fn(), draw: vi.fn(), destroy: vi.fn() };
     beforeEach(() => {
       strokeRendererOverride.current = {
-        renderer: fakeRenderer as unknown as StrokeRenderer,
+        renderer: mockRenderer as unknown as StrokeRenderer,
         error: null,
       };
     });

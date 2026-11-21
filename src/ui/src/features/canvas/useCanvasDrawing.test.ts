@@ -8,12 +8,12 @@ import type { ToolSettings } from './types';
 import { INITIAL_VIEW } from './view';
 
 // jsdom has no navigator.gpu, so no renderer is created (no drawing; only state is tracked)
-const canvasStub = () => ({
+const createMockCanvas = () => ({
   getBoundingClientRect: () => ({ left: 0, top: 0 }),
   setPointerCapture: vi.fn(),
 });
 
-interface FakeEventInit {
+interface MockEventInit {
   type: string;
   pointerType: string;
   pointerId: number;
@@ -22,8 +22,8 @@ interface FakeEventInit {
 }
 
 const pointerEvent = (
-  canvas: ReturnType<typeof canvasStub>,
-  { type, pointerType, pointerId, x, y }: FakeEventInit,
+  canvas: ReturnType<typeof createMockCanvas>,
+  { type, pointerType, pointerId, x, y }: MockEventInit,
 ) =>
   ({
     type,
@@ -54,7 +54,7 @@ const placement = (id: string, x = 10, y = 10): ImagePlacement => ({
 });
 
 function setup(settings = baseSettings) {
-  const canvas = canvasStub();
+  const canvas = createMockCanvas();
   const images = new ImageStore();
   const ref = { current: null } as RefObject<HTMLCanvasElement | null>;
   const imageEvents = {
@@ -68,7 +68,7 @@ function setup(settings = baseSettings) {
       useCanvasDrawing(ref, next, images, vi.fn(), imageEvents),
     { initialProps: settings },
   );
-  const event = (init: FakeEventInit) => pointerEvent(canvas, init);
+  const event = (init: MockEventInit) => pointerEvent(canvas, init);
   /** Presses, moves and releases with one pointer (mouse) */
   const press = (
     from: { x: number; y: number },

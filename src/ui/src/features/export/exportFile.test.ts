@@ -154,9 +154,9 @@ describe('exportPdf', () => {
   });
 
   it('取り込んだ画像は元の RGBA を SMask(α)付きで貼る', async () => {
-    // jsdom has no canvas 2D, so fake the canvas that reads the image
+    // jsdom has no canvas 2D, so mock the canvas that reads the image
     const rgba = new Uint8ClampedArray([255, 0, 0, 128]);
-    const fakeCanvas = {
+    const mockCanvas = {
       width: 0,
       height: 0,
       getContext: (kind: string) =>
@@ -169,7 +169,7 @@ describe('exportPdf', () => {
     };
     const createElement = vi
       .spyOn(document, 'createElement')
-      .mockReturnValue(fakeCanvas as unknown as HTMLCanvasElement);
+      .mockReturnValue(mockCanvas as unknown as HTMLCanvasElement);
     try {
       const blob = await exportPdf([
         {

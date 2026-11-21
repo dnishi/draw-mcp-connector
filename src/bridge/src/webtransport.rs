@@ -1026,7 +1026,7 @@ mod tests {
             .await
             .unwrap();
         provide.write_all(b"\n").await.unwrap();
-        provide.write_all(b"fake-png").await.unwrap();
+        provide.write_all(b"mock-png").await.unwrap();
         provide.finish().await.unwrap();
         // The order between streams is not fixed, so send the placement after the bytes arrive
         // (if the placement arrives first, the bridge requests the bytes, which gets mixed up with the reply to the request below)
@@ -1047,7 +1047,7 @@ mod tests {
                 .image_data("img1")
                 .as_deref()
                 .map(StoredImage::bytes),
-            Some(&b"fake-png"[..])
+            Some(&b"mock-png"[..])
         );
         assert_eq!(
             app.canvas.snapshot().current_sheet().image,
@@ -1077,7 +1077,7 @@ mod tests {
             serde_json::from_slice::<ImageStream>(header).unwrap(),
             ImageStream::Provide { id: "img1".into() }
         );
-        assert_eq!(body, b"fake-png");
+        assert_eq!(body, b"mock-png");
 
         // When a placement arrives for an image the bridge does not have, it asks the placing page for the bytes
         client

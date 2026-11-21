@@ -10,7 +10,7 @@ const info: ConnectionInfo = {
 };
 
 /** Writer of a unidirectional stream. Records what was written and whether it was closed, and can be made to fail */
-class FakeWriter {
+class MockWriter {
   chunks: Uint8Array[] = [];
   closed = false;
   fail = false;
@@ -31,14 +31,14 @@ class FakeWriter {
 
 // Queue requests to open unidirectional streams; the test completes (or fails) them manually
 let pendingOpens: {
-  resolve: (stream: FakeWriter) => void;
+  resolve: (stream: MockWriter) => void;
   reject: (error: Error) => void;
 }[];
 // Receiver for unidirectional streams from the PC. Tests feed them in with pushIncoming
 let deliverIncoming: ((stream: ReadableStream<Uint8Array>) => void) | null;
 let queuedIncoming: ReadableStream<Uint8Array>[];
 
-class FakeTransport {
+class MockTransport {
   ready = Promise.resolve();
   close() {}
   async createBidirectionalStream() {
@@ -55,7 +55,7 @@ class FakeTransport {
     };
   }
   createUnidirectionalStream() {
-    return new Promise<FakeWriter>((resolve, reject) => {
+    return new Promise<MockWriter>((resolve, reject) => {
       pendingOpens.push({ resolve, reject });
     });
   }
@@ -115,8 +115,8 @@ beforeEach(() => {
     onImageRequest: (id) => requested.push(id),
     onClose: () => {},
   };
-  vi.stubGlobal('WebTransport', FakeTransport);
-  // The bidirectional stream's pipeThrough is fake and unused, but this lets new succeed
+  vi.stubGlobal('WebTransport', MockTransport);
+  // The bidirectional stream's pipeThrough is mocked and unused, but this lets new succeed
   vi.stubGlobal('TextDecoderStream', class {});
 });
 
@@ -129,7 +129,7 @@ describe('bridgeClient の画像のバイト列', () => {
     const connection = await connectBridge(info, handlers);
 
     connection.sendImageBytes('img', new Uint8Array([1, 2, 3]));
-    const stream = new FakeWriter();
+    const stream = new MockWriter();
     pendingOpens.shift()?.resolve(stream);
     await flush();
 
@@ -156,7 +156,7 @@ describe('bridgeClient の画像のバイト列', () => {
     await flush();
     expect(requested).toEqual([]);
 
-    pendingOpens.shift()?.resolve(new FakeWriter());
+    pendingOpens.shift()?.resolve(new MockWriter());
     await flush();
     expect(requested).toEqual([]);
 
@@ -181,7 +181,7 @@ describe('bridgeClient の画像のバイト列', () => {
     connection.sendImageBytes('other', new Uint8Array([2]));
     pushRequest('other');
     await flush();
-    const stream = new FakeWriter();
+    const stream = new MockWriter();
     stream.fail = true;
     pendingOpens.shift()?.resolve(stream);
     await flush();

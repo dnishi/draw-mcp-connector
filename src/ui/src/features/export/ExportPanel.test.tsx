@@ -12,7 +12,7 @@ import {
 } from './exportFile';
 import { ExportPanel } from './ExportPanel';
 
-// Only fake the creation and download (exportFile.ts). The default name and the way the extension is added use the real thing
+// Only mock the creation and download (exportFile.ts). The default name and the way the extension is added use the real thing
 vi.mock('./exportFile', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./exportFile')>();
   return {
@@ -23,7 +23,7 @@ vi.mock('./exportFile', async (importOriginal) => {
   };
 });
 
-// The renderer does not build the export content (exportPng / exportPdf are fakes), so an empty one is enough
+// The renderer does not build the export content (exportPng / exportPdf are mocks), so an empty one is enough
 const renderer = {} as unknown as StrokeRenderer;
 const page = { width: 400, height: 300 };
 const sources: readonly SheetSource[] = [
