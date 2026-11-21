@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::canvas::Canvas;
+use crate::canvas::{Canvas, Snapshot};
 use crate::color;
 use crate::pdf::{self, PdfPage};
 use crate::protocol::{ImagePlacement, PageSize, Sheet, Stroke};
@@ -210,18 +210,33 @@ fn number(value: f64) -> String {
     trimmed.strip_suffix('.').unwrap_or(trimmed).to_string()
 }
 
-/// Turn the current sheet's area (the area after fitting it inside the sheet) into a PNG
-pub fn current_sheet_png(canvas: &Canvas, area: Rect) -> Result<Vec<u8>, String> {
-    let snapshot = canvas.snapshot();
-    sheet_png(canvas, snapshot.current_sheet(), area)
+/// Look up a sheet by ID
+fn find_sheet<'a>(snapshot: &'a Snapshot, id: &str) -> Result<&'a Sheet, String> {
+    snapshot
+        .sheets
+        .iter()
+        .find(|sheet| sheet.id == id)
+        .ok_or_else(|| "The sheet was deleted.".to_string())
 }
 
-/// Build a PDF. CurrentSheet makes the current sheet's area one page; AllSheets makes one page per
-/// sheet, in sheet order, each covering the whole `page` (area is not used)
-pub fn pdf(canvas: &Canvas, target: Target, area: Rect, page: PageSize) -> Result<Vec<u8>, String> {
+/// Turn the area (the area after fitting it inside the sheet) of the sheet given by ID into a PNG
+pub fn sheet_png_by_id(canvas: &Canvas, sheet: &str, area: Rect) -> Result<Vec<u8>, String> {
+    let snapshot = canvas.snapshot();
+    sheet_png(canvas, find_sheet(&snapshot, sheet)?, area)
+}
+
+/// Build a PDF. CurrentSheet makes the area of the sheet given by ID one page; AllSheets makes one
+/// page per sheet, in sheet order, each covering the whole `page` (area is not used)
+pub fn pdf(
+    canvas: &Canvas,
+    target: Target,
+    sheet: &str,
+    area: Rect,
+    page: PageSize,
+) -> Result<Vec<u8>, String> {
     let snapshot = canvas.snapshot();
     let pages = match target {
-        Target::CurrentSheet => vec![pdf_page(canvas, snapshot.current_sheet(), area)?],
+        Target::CurrentSheet => vec![pdf_page(canvas, find_sheet(&snapshot, sheet)?, area)?],
         Target::AllSheets => snapshot
             .sheets
             .iter()
@@ -234,7 +249,7 @@ pub fn pdf(canvas: &Canvas, target: Target, area: Rect, page: PageSize) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{Author, CanvasOp, Stroke, StrokePoint};
+    use crate::protocol::{Author, CanvasOp, INITIAL_SHEET_ID, Stroke, StrokePoint};
     use std::path::PathBuf;
 
     /// A single-point stroke at canvas coordinates (x, y)
@@ -343,7 +358,7 @@ mod tests {
     fn the_current_sheet_png_is_the_area_twice_as_large() {
         let canvas = canvas_with_strokes(vec![stroke("s", 10.0, 10.0)]);
         let area = Rect::from_edges(0.0, 0.0, 40.0, 20.0);
-        let png = current_sheet_png(&canvas, area).unwrap();
+        let png = sheet_png_by_id(&canvas, INITIAL_SHEET_ID, area).unwrap();
 
         let (width, height, pixels) = decode(&png);
         assert_eq!((width, height), (80, 40), "範囲 × 2");
@@ -354,7 +369,12 @@ mod tests {
     #[test]
     fn a_stroke_outside_the_area_is_not_in_the_png() {
         let canvas = canvas_with_strokes(vec![stroke("s", 100.0, 100.0)]);
-        let png = current_sheet_png(&canvas, Rect::from_edges(0.0, 0.0, 40.0, 20.0)).unwrap();
+        let png = sheet_png_by_id(
+            &canvas,
+            INITIAL_SHEET_ID,
+            Rect::from_edges(0.0, 0.0, 40.0, 20.0),
+        )
+        .unwrap();
 
         let (_, _, pixels) = decode(&png);
         assert!(
@@ -372,7 +392,7 @@ mod tests {
             height: 50.0,
         };
         let area = Rect::from_edges(20.0, 10.0, 60.0, 40.0);
-        let pdf = pdf(&canvas, Target::CurrentSheet, area, page).unwrap();
+        let pdf = pdf(&canvas, Target::CurrentSheet, INITIAL_SHEET_ID, area, page).unwrap();
 
         let text = String::from_utf8_lossy(&pdf);
         assert!(
@@ -427,7 +447,7 @@ mod tests {
             height: 50.0,
         };
         let area = Rect::from_edges(20.0, 10.0, 60.0, 40.0);
-        let pdf = pdf(&canvas, Target::CurrentSheet, area, page).unwrap();
+        let pdf = pdf(&canvas, Target::CurrentSheet, INITIAL_SHEET_ID, area, page).unwrap();
         let text = String::from_utf8_lossy(&pdf);
 
         // 1. Cut everything outside the page (40px × 30px = 30pt × 22.5pt)
@@ -475,7 +495,14 @@ mod tests {
             width: 100.0,
             height: 50.0,
         };
-        let pdf = pdf(&canvas, Target::CurrentSheet, Rect::from(page), page).unwrap();
+        let pdf = pdf(
+            &canvas,
+            Target::CurrentSheet,
+            INITIAL_SHEET_ID,
+            Rect::from(page),
+            page,
+        )
+        .unwrap();
         let text = String::from_utf8_lossy(&pdf);
 
         // The content has the placement (10 × 4, y bottom edge 11)
@@ -500,6 +527,7 @@ mod tests {
         let pdf = pdf(
             &canvas,
             Target::AllSheets,
+            INITIAL_SHEET_ID,
             Rect {
                 x: 0.0,
                 y: 0.0,
@@ -539,6 +567,7 @@ mod tests {
         let pdf = pdf(
             &canvas,
             Target::AllSheets,
+            INITIAL_SHEET_ID,
             Rect {
                 x: 0.0,
                 y: 0.0,
@@ -557,5 +586,53 @@ mod tests {
             .take_while(|c| c.is_ascii_digit())
             .collect();
         assert_eq!(digits, "3", "全部のシートならシート 1 枚が PDF の 1 ページ");
+    }
+
+    /// Even when the current sheet is another one, sheet_png_by_id draws the sheet given by ID
+    #[test]
+    fn sheet_png_by_id_renders_the_sheet_named_by_id_not_the_current_sheet() {
+        // Put a stroke only on the first sheet, and make the second sheet current
+        let canvas = canvas_with_strokes(vec![stroke("s", 10.0, 10.0)]);
+        canvas.apply(
+            crate::canvas::Origin::Ai,
+            CanvasOp::AddSheet {
+                id: "b".into(),
+                index: 1,
+            },
+        );
+        canvas.apply(
+            crate::canvas::Origin::Ai,
+            CanvasOp::SelectSheet { id: "b".into() },
+        );
+        let area = Rect::from_edges(0.0, 0.0, 40.0, 20.0);
+        let png = sheet_png_by_id(&canvas, INITIAL_SHEET_ID, area).unwrap();
+
+        let (width, height, pixels) = decode(&png);
+        assert_eq!((width, height), (80, 40), "範囲 × 2");
+        let at = |x: usize, y: usize| &pixels[(y * width as usize + x) * 3..][..3];
+        assert_eq!(
+            at(20, 20),
+            [0, 0, 0],
+            "今のシート(b)ではなく 1 枚目の筆跡が写る"
+        );
+    }
+
+    /// Passing the ID of a missing sheet is an error for both PNG and PDF (CurrentSheet)
+    #[test]
+    fn a_missing_sheet_id_is_an_error_for_png_and_current_sheet_pdf() {
+        let canvas = canvas_with_strokes(Vec::new());
+        let page = PageSize {
+            width: 100.0,
+            height: 50.0,
+        };
+        let area = Rect::from(page);
+        assert_eq!(
+            sheet_png_by_id(&canvas, "gone", area).err(),
+            Some("The sheet was deleted.".to_string())
+        );
+        assert_eq!(
+            pdf(&canvas, Target::CurrentSheet, "gone", area, page).err(),
+            Some("The sheet was deleted.".to_string())
+        );
     }
 }

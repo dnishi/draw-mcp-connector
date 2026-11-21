@@ -491,7 +491,8 @@ pub fn run(app: Arc<App>, start: impl FnOnce()) -> ! {
             }
             Event::UserEvent(UserEvent::ExportArea(request)) => {
                 let proxy = proxy.clone();
-                match ExportWindow::open(target, &app, request, proxy) {
+                // Pass a clone to open, so the request can be handed to finish if the window can't be opened
+                match ExportWindow::open(target, &app, request.clone(), proxy) {
                     Ok(window) => export_window = Some(window),
                     Err(error) => {
                         warn!("範囲を選ぶウィンドウを開けない: {error}");

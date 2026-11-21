@@ -38,13 +38,24 @@ pub struct ExportWindow {
 }
 
 impl ExportWindow {
-    /// Opens the window. Draws the current sheet at the moment of opening (the area is the whole sheet at first)
+    /// Opens the window. Draws the current sheet at the moment the export started (the area is the
+    /// whole sheet at first). An error if that sheet has been deleted
     pub fn open<T: 'static>(
         target: &EventLoopWindowTarget<T>,
         app: &App,
         request: AreaRequest,
         proxy: EventLoopProxy<UserEvent>,
     ) -> Result<Self, String> {
+        // Copy the current sheet at the moment the export started (changes after opening are not
+        // followed). If it has been deleted, stop before creating the window (so it doesn't flash)
+        let snapshot = app.canvas.snapshot();
+        let Some(sheet) = snapshot
+            .sheets
+            .iter()
+            .find(|sheet| sheet.id == request.sheet)
+        else {
+            return Err("The sheet was deleted.".to_string());
+        };
         let window = WindowBuilder::new()
             .with_title(format!("{} - Export", config::APP_NAME))
             .with_inner_size(LogicalSize::new(
@@ -62,9 +73,6 @@ impl ExportWindow {
         let context = Context::new(window.clone()).map_err(|error| error.to_string())?;
         let surface = Surface::new(&context, window.clone()).map_err(|error| error.to_string())?;
 
-        // Copies the current sheet at the moment of opening (changes after opening are not followed)
-        let snapshot = app.canvas.snapshot();
-        let sheet = snapshot.current_sheet();
         let image = sheet.image.as_ref().and_then(|placement| {
             app.canvas
                 .image_data(&placement.id)
@@ -96,7 +104,7 @@ impl ExportWindow {
 
     /// The request of this export
     pub fn request(&self) -> AreaRequest {
-        self.request
+        self.request.clone()
     }
 
     /// The current area (CSS pixels)

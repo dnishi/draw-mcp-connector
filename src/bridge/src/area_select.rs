@@ -457,10 +457,14 @@ impl State {
             }
         }
         let sheet_area = self.layout.sheet_area;
-        if sheet_area.w <= 0.0 || !sheet_area.contains(x, y) {
+        // If the sheet can't be drawn (width 0), nothing below can be hit
+        if sheet_area.w <= 0.0 {
             return Hit::Elsewhere;
         }
         let (scale, area) = (self.layout.scale, self.area);
+        // The handles are drawn centered on the area's corners, so they stick out of the sheet.
+        // Check the corners before checking whether the point is outside the sheet, so the part
+        // that sticks out can be grabbed too
         // The four corners of the area (screen logical pixels)
         let corners = [
             (
@@ -485,10 +489,26 @@ impl State {
             ),
         ];
         let reach = HANDLE / 2.0;
+        // When the area is small, the four handles overlap. Grabbing the first corner hit (top-left)
+        // would make it impossible to extend the area toward the bottom right, so grab the corner
+        // nearest to the pressed point. On a tie, keep the earlier one in the array
+        // (top-left → top-right → bottom-left → bottom-right)
+        let mut nearest: Option<(Corner, f64)> = None;
         for (corner, cx, cy) in corners {
-            if (x - cx).abs() <= reach && (y - cy).abs() <= reach {
-                return Hit::Corner(corner);
+            if (x - cx).abs() > reach || (y - cy).abs() > reach {
+                continue;
             }
+            let distance = (x - cx).powi(2) + (y - cy).powi(2);
+            if nearest.is_none_or(|(_, kept)| distance < kept) {
+                nearest = Some((corner, distance));
+            }
+        }
+        if let Some((corner, _)) = nearest {
+            return Hit::Corner(corner);
+        }
+        // Outside the corner handles and outside the sheet, nothing is hit
+        if !sheet_area.contains(x, y) {
+            return Hit::Elsewhere;
         }
         // The position on the sheet (CSS pixels)
         let (sx, sy) = ((x - sheet_area.x) / scale, (y - sheet_area.y) / scale);
@@ -1118,6 +1138,111 @@ mod tests {
         );
         // The margin
         assert_eq!(state.hit(0.0, 0.0), Hit::Elsewhere);
+    }
+
+    /// The handles stick out of the sheet, so the part that sticks out also resizes from that corner. Further out, nothing is hit
+    #[test]
+    fn hit_testing_reports_corner_handles_beyond_the_sheet_edge() {
+        let state = state();
+        let (left, top, right, bottom) = sheet_area_edges(&state);
+        // The initial area is the whole sheet, so each handle is centered on a corner of the sheet
+        // Points outside the sheet within 5 (HANDLE / 2) of the handle center horizontally and vertically
+        assert_eq!(
+            state.hit(left - 4.0, top - 4.0),
+            Hit::Corner(Corner::TopLeft)
+        );
+        assert_eq!(
+            state.hit(right + 4.0, top - 4.0),
+            Hit::Corner(Corner::TopRight)
+        );
+        assert_eq!(
+            state.hit(left - 4.0, bottom + 4.0),
+            Hit::Corner(Corner::BottomLeft)
+        );
+        assert_eq!(
+            state.hit(right + 4.0, bottom + 4.0),
+            Hit::Corner(Corner::BottomRight)
+        );
+        // Outside the handle (6 from the center) is not hit
+        assert_eq!(state.hit(left - 6.0, top - 6.0), Hit::Elsewhere);
+    }
+
+    /// When the area is small, the four handles overlap. Then the corner nearest to the pressed point is grabbed
+    #[test]
+    fn a_small_area_grabs_the_nearest_corner_when_the_handles_overlap() {
+        let mut state = state();
+        state.area = Rect::from_edges(100.0, 100.0, 101.0, 101.0);
+        let scale = state.layout.scale;
+        let (left, top, _, _) = sheet_area_edges(&state);
+        // Screen position of the bottom-right corner
+        let (bottom_right_x, bottom_right_y) = (
+            left + state.area.right() * scale,
+            top + state.area.bottom() * scale,
+        );
+        // Screen position of the top-left corner
+        let (top_left_x, top_left_y) = (left + state.area.x * scale, top + state.area.y * scale);
+        assert_eq!(
+            state.hit(bottom_right_x + 3.0, bottom_right_y + 3.0),
+            Hit::Corner(Corner::BottomRight)
+        );
+        assert_eq!(
+            state.hit(top_left_x - 3.0, top_left_y - 3.0),
+            Hit::Corner(Corner::TopLeft)
+        );
+        assert_eq!(
+            state.hit(top_left_x + 3.0, top_left_y - 3.0),
+            Hit::Corner(Corner::TopRight)
+        );
+        assert_eq!(
+            state.hit(top_left_x - 3.0, top_left_y + 3.0),
+            Hit::Corner(Corner::BottomLeft)
+        );
+    }
+
+    /// Grabbing the bottom-right corner of a small area and dragging toward the bottom right extends only that side (the top-left doesn't move)
+    #[test]
+    fn dragging_the_bottom_right_corner_of_a_small_area_extends_only_that_side() {
+        let mut state = state();
+        state.area = Rect::from_edges(100.0, 100.0, 101.0, 101.0);
+        let scale = state.layout.scale;
+        let (left, top, _, _) = sheet_area_edges(&state);
+        // 3 logical pixels to the bottom right of the screen position of the bottom-right corner
+        let (x, y) = (
+            left + state.area.right() * scale + 3.0,
+            top + state.area.bottom() * scale + 3.0,
+        );
+        state.move_mouse(x, y);
+        state.press();
+        state.move_mouse(x + 20.0, y + 20.0);
+        assert!(state.area.right() > 101.0, "右下は広がる");
+        assert!(state.area.bottom() > 101.0, "右下は広がる");
+        assert_eq!(state.area.x, 100.0, "左上は動かない");
+        assert_eq!(state.area.y, 100.0, "左上は動かない");
+    }
+
+    /// Grabbing the part of a handle that sticks out of the sheet and dragging inward moves only that corner
+    #[test]
+    fn resizing_from_a_handle_beyond_the_sheet_edge_moves_only_that_corner() {
+        let mut state = state();
+        let (_left, _top, right, bottom) = sheet_area_edges(&state);
+        let scale = state.layout.scale;
+        // A point on the bottom-right handle outside the sheet: the cursor is the corner shape
+        state.move_mouse(right + 4.0, bottom + 4.0);
+        assert_eq!(state.cursor(), Cursor::NwseResize);
+        // Press and drag into the sheet
+        state.press();
+        state.move_mouse(right - 100.0, bottom - 50.0);
+        // Shrinks by the movement from the pressed point (4 outside the right and bottom edges), 104 and 54 logical pixels, divided by the scale
+        assert!(
+            (state.area.right() - (400.0 - 104.0 / scale)).abs() < 1e-9,
+            "右下は内へ動く"
+        );
+        assert!(
+            (state.area.bottom() - (300.0 - 54.0 / scale)).abs() < 1e-9,
+            "右下は内へ動く"
+        );
+        assert_eq!(state.area.x, 0.0, "左上は動かない");
+        assert_eq!(state.area.y, 0.0);
     }
 
     #[test]

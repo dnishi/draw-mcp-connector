@@ -68,7 +68,9 @@ export type AreaDrag =
  * What is under the pressed position (canvas coordinates). Given the view scale, the size that
  * hits a handle matches `HANDLE_SIZE` in screen CSS pixels, which is `HANDLE_SIZE / scale` in
  * canvas coordinates. It is checked in the same order as hit in the bridge's area_select.rs
- * (corners → inside the area → otherwise)
+ * (corners → inside the area → otherwise). When the area is small the handles overlap; then the
+ * corner nearest to the pressed point is returned (if only the first corner, top-left, could be
+ * grabbed, the area could not be extended toward the bottom right)
  */
 export function hitArea(point: Point, area: Area, scale = 1): AreaHit {
   const right = area.x + area.width;
@@ -80,10 +82,19 @@ export function hitArea(point: Point, area: Area, scale = 1): AreaHit {
     ['bottom-left', area.x, bottom],
     ['bottom-right', right, bottom],
   ];
+  let closest: Corner | null = null;
+  let closestDistance = 0;
   for (const [corner, cx, cy] of corners) {
     if (Math.abs(point.x - cx) <= reach && Math.abs(point.y - cy) <= reach) {
-      return { kind: 'resize', corner };
+      const distance = (point.x - cx) ** 2 + (point.y - cy) ** 2;
+      if (closest === null || distance < closestDistance) {
+        closest = corner;
+        closestDistance = distance;
+      }
     }
+  }
+  if (closest !== null) {
+    return { kind: 'resize', corner: closest };
   }
   if (
     area.x <= point.x &&

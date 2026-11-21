@@ -10,7 +10,6 @@ use std::sync::{
 };
 
 use crate::app::App;
-use crate::canvas::Canvas;
 use crate::export::{self, Format, Target};
 use crate::export_dialog;
 use crate::protocol::PageSize;
@@ -52,10 +51,13 @@ impl Drop for Guard<'_> {
 }
 
 /// The result before the area is decided. Returned to the event loop when an area has to be chosen
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct AreaRequest {
     pub format: Format,
     pub target: Target,
+    /// The ID of the current sheet at the moment the export started. Used for what the area window
+    /// shows and for the Current Sheet export. Not used for All Sheets
+    pub sheet: String,
     pub page: PageSize,
 }
 
@@ -91,11 +93,15 @@ pub fn start(
             );
             return;
         };
+        // Remember the current sheet at the moment the export starts (even if the sheet is switched
+        // while the area window is open, this sheet is exported)
+        let sheet = app.canvas.snapshot().current;
         // In every ending, this thread does not set it back, and hands it on to the next side
         guard.handoff = true;
         let request = AreaRequest {
             format,
             target,
+            sheet,
             page,
         };
         if target == Target::AllSheets {
@@ -132,7 +138,7 @@ pub fn finish(app: Arc<App>, state: &ExportState, request: AreaRequest, area: Op
 fn run_export(app: &App, request: &AreaRequest, area: Rect) {
     let stamp = export_dialog::local_stamp();
     let sheet = (request.target == Target::CurrentSheet)
-        .then(|| current_sheet_number(&app.canvas))
+        .then(|| app.canvas.snapshot().sheet_number(&request.sheet))
         .flatten();
     let name = export::default_file_name(stamp.as_deref(), sheet, request.format);
     let Some(path) = export_dialog::choose_save_path(&name, request.format) else {
@@ -140,8 +146,14 @@ fn run_export(app: &App, request: &AreaRequest, area: Rect) {
     };
     let path = export::with_extension(&path, request.format);
     let bytes = match request.format {
-        Format::Png => export::current_sheet_png(&app.canvas, area),
-        Format::Pdf => export::pdf(&app.canvas, request.target, area, request.page),
+        Format::Png => export::sheet_png_by_id(&app.canvas, &request.sheet, area),
+        Format::Pdf => export::pdf(
+            &app.canvas,
+            request.target,
+            &request.sheet,
+            area,
+            request.page,
+        ),
     };
     match bytes {
         Ok(bytes) => {
@@ -151,12 +163,6 @@ fn run_export(app: &App, request: &AreaRequest, area: Rect) {
         }
         Err(reason) => export_dialog::show_message(&format!("Couldn't export: {reason}")),
     }
-}
-
-/// The number of the current sheet (counting from 1)
-fn current_sheet_number(canvas: &Canvas) -> Option<usize> {
-    let snapshot = canvas.snapshot();
-    snapshot.sheet_number(&snapshot.current)
 }
 
 #[cfg(test)]

@@ -55,6 +55,27 @@ describe('hitArea', () => {
     expect(hitArea({ x: 390, y: 290 }, area)).toEqual({ kind: 'new' });
   });
 
+  it('範囲が小さいとハンドルが重なるので、押した点に一番近い隅が掴める', () => {
+    const small = { x: 100, y: 80, width: 1, height: 1 };
+    // Corners: (100,80) (101,80) (100,81) (101,81). Every point hits all four handles
+    expect(hitArea({ x: 101 + 5, y: 81 + 5 }, small)).toEqual({
+      kind: 'resize',
+      corner: 'bottom-right',
+    });
+    expect(hitArea({ x: 100 - 5, y: 80 - 5 }, small)).toEqual({
+      kind: 'resize',
+      corner: 'top-left',
+    });
+    expect(hitArea({ x: 106, y: 75 }, small)).toEqual({
+      kind: 'resize',
+      corner: 'top-right',
+    });
+    expect(hitArea({ x: 95, y: 86 }, small)).toEqual({
+      kind: 'resize',
+      corner: 'bottom-left',
+    });
+  });
+
   it('scale を渡すと、ハンドルに当たる大きさはシート座標で HANDLE_SIZE/scale になる', () => {
     const scale = 0.8;
     const reach = 12 / scale; // HANDLE_SIZE / 2 / scale
@@ -121,6 +142,19 @@ describe('beginDrag', () => {
       kind: 'move',
       start: area,
       startPoint: { x: 200, y: 150 },
+    });
+  });
+
+  it('小さい範囲の重なったハンドルは、押した点に近い隅の大きさ変えになる', () => {
+    const small = { x: 100, y: 80, width: 1, height: 1 };
+    const drag = beginDrag({ x: 106, y: 86 }, small, page);
+    expect(drag).toMatchObject({ kind: 'resize', corner: 'bottom-right' });
+    // Moving further to the bottom right extends only the bottom right. The top-left (100, 80) doesn't move
+    expect(draggedArea(drag, { x: 110, y: 90 }, page)).toEqual({
+      x: 100,
+      y: 80,
+      width: 5,
+      height: 5,
     });
   });
 
